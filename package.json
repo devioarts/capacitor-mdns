@@ -10,6 +10,7 @@
     "android/src/main/",
     "android/build.gradle",
     "dist/",
+    "electron/",
     "ios/Sources",
     "ios/Tests",
     "Package.swift",
@@ -27,7 +28,15 @@
   "keywords": [
     "capacitor",
     "plugin",
-    "native"
+    "native",
+    "multicast-dns",
+    "mdns",
+    "bonjour",
+    "zeroconf",
+    "zero-configuration",
+    "ios",
+    "android",
+    "electron"
   ],
   "scripts": {
     "verify": "npm run verify:ios && npm run verify:android && npm run verify:web",

@@ -400,7 +400,7 @@ extension MDNS: NetServiceDelegate {
     }
 
     /// Called when the service failed to publish. We translate the error dictionary into NSError.
-    public func netService(_ sender: NetService, didNotPublish errorDict: [String : NSNumber]) {
+    public func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
         if let cb = publishCompletion {
             publishCompletion = nil
             let code = (errorDict[NetService.errorCode] as NSNumber?)?.intValue ?? -1

@@ -9,46 +9,52 @@ npm install @devioarts/capacitor-mdns
 npx cap sync
 ```
 
+## Android
+#### /android/app/src/main/AndroidManifest.xml
 ```xml
 <uses-permission android:name="android.permission.INTERNET" />
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+<!-- Android 12+ -->
+<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+<application android:usesCleartextTraffic="true"></application>
 ```
 
-```bash
-npm install @capacitor/ios
-npm run build
-npx cap add ios --packagemanager SPM
-```
-
-### info.plist
-
-```file:ios/App/App/Info.plist
+## iOS
+#### /ios/App/App/Info.plist
+```xml
 <key>NSLocalNetworkUsageDescription</key>
-<string>Local server/client connection</string>
+<string>It is needed for the correct functioning of the application</string>
 <key>NSAppTransportSecurity</key>
 <dict>
-  <key>NSAllowsLocalNetworking</key>
-  <true/>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
 </dict>
 <key>NSBonjourServices</key>
 <array>
     <string>_http._tcp</string>
-    <string>_lancomm._tcp</string>
 </array>
 ```
+
 ---
 ## ElectronJS
+
 ```shell
 npm i bonjour-service@1.3.0
 ```
-### electron/main.ts
+
+> Implementation example was developed on [capacitor-electron](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-electron)
+> base, if you run electron differently, you may need to adjust the code.
+
+#### /electron/main.ts
+
 ```typescript
 // ...
-// THIS IS IMPORTANT FOR PLUGIN!
+// THIS LINE IS IMPORTANT FOR PLUGIN!
 import { registerMdnsIpc } from '@devioarts/capacitor-mdns/electron/mdns'
 // ...
 app.whenReady().then(() => {
-  // THIS IS IMPORTANT FOR PLUGIN!
+  // THIS LINE IS IMPORTANT FOR PLUGIN!
   registerMdnsIpc();
   //...
 });
@@ -69,9 +75,9 @@ contextBridge.exposeInMainWorld('mdns', createMDNSAPI({ ipcRenderer })) // alias
 
 <docgen-index>
 
-* [`mdnsStartBroadcast(...)`](#mdnsstartbroadcast)
-* [`mdnsStopBroadcast()`](#mdnsstopbroadcast)
-* [`mdnsDiscover(...)`](#mdnsdiscover)
+* [`startBroadcast(...)`](#startbroadcast)
+* [`stopBroadcast()`](#stopbroadcast)
+* [`discover(...)`](#discover)
 * [Interfaces](#interfaces)
 * [Type Aliases](#type-aliases)
 
@@ -82,10 +88,10 @@ contextBridge.exposeInMainWorld('mdns', createMDNSAPI({ ipcRenderer })) // alias
 
 Public API surface of the Capacitor mDNS plugin.
 
-### mdnsStartBroadcast(...)
+### startBroadcast(...)
 
 ```typescript
-mdnsStartBroadcast(options: MdnsBroadcastOptions) => Promise<{ name: string; publishing: boolean; }>
+startBroadcast(options: MdnsBroadcastOptions) => Promise<{ name: string; publishing: boolean; }>
 ```
 
 Start advertising a Bonjour/mDNS service.
@@ -99,10 +105,10 @@ Start advertising a Bonjour/mDNS service.
 --------------------
 
 
-### mdnsStopBroadcast()
+### stopBroadcast()
 
 ```typescript
-mdnsStopBroadcast() => Promise<{ publishing: boolean; }>
+stopBroadcast() => Promise<{ publishing: boolean; }>
 ```
 
 Stop advertising the currently registered service (no-op if none).
@@ -112,10 +118,10 @@ Stop advertising the currently registered service (no-op if none).
 --------------------
 
 
-### mdnsDiscover(...)
+### discover(...)
 
 ```typescript
-mdnsDiscover(options?: MdnsDiscoverOptions | undefined) => Promise<{ services: MdnsService[]; }>
+discover(options?: MdnsDiscoverOptions | undefined) => Promise<{ services: MdnsService[]; }>
 ```
 
 Discover services of a given type and optionally filter by instance name.
@@ -148,7 +154,7 @@ Options for starting a Bonjour/mDNS advertisement.
 #### MdnsService
 
 Normalized description of a discovered Bonjour/mDNS service.
-Returned from {@link mDNSPlugin.mdnsDiscover}.
+Returned from {@link mDNSPlugin.discover}.
 
 | Prop         | Type                                        | Description                                                                               |
 | ------------ | ------------------------------------------- | ----------------------------------------------------------------------------------------- |
@@ -187,8 +193,6 @@ Values are UTF-8 strings; binary payloads are not supported by this API.
 
 Construct a type with a set of properties K of type T
 
-<code>{
- [P in K]: T;
- }</code>
+<code>{ [P in K]: T; }</code>
 
 </docgen-api>

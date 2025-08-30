@@ -12,9 +12,9 @@ declare global {
      * Primary name with the same casing as iOS jsName.
      */
     mDNS: {
-      mdnsStartBroadcast(options: MdnsBroadcastOptions): Promise<{ publishing: boolean; name: string }>
-      mdnsStopBroadcast(): Promise<{ publishing: boolean }>
-      mdnsDiscover(options?: MdnsDiscoverOptions): Promise<{ services: MdnsService[] }>
+      startBroadcast(options: MdnsBroadcastOptions): Promise<{ publishing: boolean; name: string }>
+      stopBroadcast(): Promise<{ publishing: boolean }>
+      discover(options?: MdnsDiscoverOptions): Promise<{ services: MdnsService[] }>
     }
     /**
      * Lowercase alias for convenience.

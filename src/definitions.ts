@@ -9,7 +9,7 @@ export type MdnsTxt = Record<string, string>;
 
 /**
  * Normalized description of a discovered Bonjour/mDNS service.
- * Returned from {@link mDNSPlugin.mdnsDiscover}.
+ * Returned from {@link mDNSPlugin.discover}.
  *
  * @remarks
  * - `hosts` contains resolved IPv4/IPv6 numeric addresses (no DNS names).
@@ -134,13 +134,13 @@ export interface MdnsDiscoverOptions {
  * import { mDNS } from 'capacitor-mdns';
  *
  * // Start advertising
- * await mDNS.mdnsStartBroadcast({ type: '_http._tcp.', id: 'my.app.id', port: 9235 });
+ * await mDNS.startBroadcast({ type: '_http._tcp.', id: 'my.app.id', port: 9235 });
  *
  * // Discover services
- * const { services } = await mDNS.mdnsDiscover({ type: '_http._tcp.', timeoutMs: 3000 });
+ * const { services } = await mDNS.discover({ type: '_http._tcp.', timeoutMs: 3000 });
  *
  * // Stop advertising
- * await mDNS.mdnsStopBroadcast();
+ * await mDNS.stopBroadcast();
  * ```
  *
  * @public
@@ -152,7 +152,7 @@ export interface mDNSPlugin {
    * @param options - {@link MdnsBroadcastOptions}
    * @returns Promise resolving to `{ publishing: boolean }` (`true` on success).
    */
-  mdnsStartBroadcast(options: MdnsBroadcastOptions): Promise<{name:string, publishing: boolean }>;
+  startBroadcast(options: MdnsBroadcastOptions): Promise<{name:string, publishing: boolean }>;
 
   /**
    * Stop advertising the currently registered service (no-op if none).
@@ -160,7 +160,7 @@ export interface mDNSPlugin {
    * @returns Promise resolving to `{ publishing: boolean }`.
    * @remarks The `publishing` flag may be `false` after a successful stop.
    */
-  mdnsStopBroadcast(): Promise<{ publishing: boolean }>;
+  stopBroadcast(): Promise<{ publishing: boolean }>;
 
   /**
    * Discover services of a given type and optionally filter by instance name.
@@ -169,5 +169,5 @@ export interface mDNSPlugin {
    * @returns Promise resolving to `{ services: MdnsService[] }`.
    * @remarks The result list is normalized across platforms. On Android, `txt` is typically absent.
    */
-  mdnsDiscover(options?: MdnsDiscoverOptions): Promise<{ services: MdnsService[] }>;
+  discover(options?: MdnsDiscoverOptions): Promise<{ services: MdnsService[] }>;
 }

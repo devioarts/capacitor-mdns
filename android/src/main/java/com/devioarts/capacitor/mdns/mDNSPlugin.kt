@@ -15,7 +15,7 @@ import org.json.JSONArray
  * - Handle lifecycle cleanup to avoid leaked listeners/coroutines.
  *
  * Notes:
- * - The plugin mirrors the iOS API: mdnsStartBroadcast / mdnsStopBroadcast / mdnsDiscover.
+ * - The plugin mirrors the iOS API: startBroadcast / stopBroadcast / discover.
  * - TXT records are not exposed by Android NSD, therefore discovery result omits TXT on Android.
  */
 @CapacitorPlugin(name = "mDNS")
@@ -53,8 +53,8 @@ class mDNSPlugin : Plugin() {
      * Resolves with: { publishing: true, name: string }
      */
     @PluginMethod
-    fun mdnsStartBroadcast(call: PluginCall) {
-        val type = call.getString("type") ?: "_cap-mdns._tcp."
+    fun startBroadcast(call: PluginCall) {
+        val type = call.getString("type") ?: "_http._tcp."
         val name = call.getString("id") ?: (context?.packageName ?: "mDNS")
         val port = call.getInt("port") ?: 0
         if (port <= 0) {
@@ -82,9 +82,9 @@ class mDNSPlugin : Plugin() {
      * Resolves with an empty object for convenience.
      */
     @PluginMethod
-    fun mdnsStopBroadcast(call: PluginCall) {
+    fun stopBroadcast(call: PluginCall) {
         mdns.stopBroadcast()
-        call.resolve()
+        call.resolve(JSObject().put("publishing", false))
     }
 
     /**
@@ -92,8 +92,8 @@ class mDNSPlugin : Plugin() {
      *
      * Expected options:
      *   {
-     *     type?: string = "_cap-mdns._tcp.",
-     *     id?: string,               // exact match on Android NSD; iOS supports prefix match
+     *     type?: string = "_http._tcp.",
+     *     id?: string,               // normalized exact or prefix match
      *     timeoutMs?: number = 3000
      *   }
      *
@@ -109,8 +109,8 @@ class mDNSPlugin : Plugin() {
      *   }
      */
     @PluginMethod
-    fun mdnsDiscover(call: PluginCall) {
-        val type = call.getString("type") ?: "_cap-mdns._tcp."
+    fun discover(call: PluginCall) {
+        val type = call.getString("type") ?: "_http._tcp."
         val targetId = call.getString("id") // optional exact name (Android NSD does not handle "(n)" suffix normalization)
         val timeoutMs = call.getInt("timeoutMs") ?: 3000
 

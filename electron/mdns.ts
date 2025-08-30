@@ -235,6 +235,8 @@ export class MDNSMain {
   private static registered = false;
   private win?: BrowserWindow;
 
+
+
   constructor(win?: BrowserWindow) {
     this.win = win;
 

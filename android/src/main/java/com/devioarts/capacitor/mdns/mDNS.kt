@@ -171,7 +171,7 @@ class mDNS(
 
                         // Early-exit: if target requested and this one matches, stop immediately.
                         if (targetName != null && matchesTarget(s.serviceName)) {
-                            safeStopDiscovery(discoveryListener)  // <-- FIX: pass DiscoveryListener instance
+                            safeStopDiscovery(discoveryListener)
                             if (!result.isCompleted) result.complete(found.toList())
                         }
                     }

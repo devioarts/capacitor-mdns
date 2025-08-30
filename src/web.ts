@@ -14,24 +14,24 @@ export class mDNSWeb extends WebPlugin implements mDNSPlugin {
     return (window as any).mDNS || (window as any).mdns
   }
 
-  async mdnsStartBroadcast(options:MdnsBroadcastOptions): Promise<{name:string, publishing: boolean }> {
+  async startBroadcast(options:MdnsBroadcastOptions): Promise<{name:string, publishing: boolean }> {
     const api = this.electronApi
-    if (api?.mdnsStartBroadcast) return api.mdnsStartBroadcast(options)
-    console.log("[NOT_SUPPORTED] mdnsStartBroadcast", options);
+    if (api?.startBroadcast) return api.startBroadcast(options)
+    console.log("[NOT_SUPPORTED] startBroadcast", options);
     return {name:"Not implemented on web", publishing: true };
   }
 
-  async mdnsStopBroadcast(): Promise<{ publishing: boolean }> {
+  async stopBroadcast(): Promise<{ publishing: boolean }> {
     const api = this.electronApi
-    if (api?.mdnsStopBroadcast) return api.mdnsStopBroadcast()
-    console.log("[NOT_SUPPORTED] mdnsStartBroadcast");
+    if (api?.stopBroadcast) return api.stopBroadcast()
+    console.log("[NOT_SUPPORTED] startBroadcast");
     return { publishing: false };
   }
-  async mdnsDiscover(options: MdnsDiscoverOptions = {}): Promise< { services: any[] }>{
+  async discover(options: MdnsDiscoverOptions = {}): Promise< { services: any[] }>{
     const api = this.electronApi
-    if (api?.mdnsDiscover) return api.mdnsDiscover(options)
+    if (api?.discover) return api.discover(options)
 
-    console.log("[NOT_SUPPORTED] mdnsDiscover");
+    console.log("[NOT_SUPPORTED] discover");
     return { services: [] };
   }
 }

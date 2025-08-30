@@ -15,9 +15,9 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "mDNSPlugin"
     public let jsName = "mDNS"
     public let pluginMethods: [CAPPluginMethod] = [
-        CAPPluginMethod(name: "mdnsStartBroadcast", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "mdnsStopBroadcast",  returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "mdnsDiscover",       returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "startBroadcast", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stopBroadcast", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "discover", returnType: CAPPluginReturnPromise),
     ]
 
     /// Single manager instance used by this plugin.
@@ -37,7 +37,7 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
      * Note: The promise resolves after the system confirms publish (NetService.didPublish),
      * so `name` is the final instance name (may include " (n)").
      */
-    @objc public func mdnsStartBroadcast(_ call: CAPPluginCall) {
+    @objc public func startBroadcast(_ call: CAPPluginCall) {
         var type = call.getString("type") ?? "_http._tcp."
         if type.last != "." { type += "." }
 
@@ -65,7 +65,7 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
      * Stop advertising the currently registered service (no-op if none).
      * Resolves with: { publishing: false }
      */
-    @objc public func mdnsStopBroadcast(_ call: CAPPluginCall) {
+    @objc public func stopBroadcast(_ call: CAPPluginCall) {
         mdns.stopBroadcast()
         call.resolve(["publishing": false])
     }
@@ -81,7 +81,7 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
      *
      * Resolves with: { services: Array<{ name,type,domain,port,hosts?,txt? }> }
      */
-    @objc public func mdnsDiscover(_ call: CAPPluginCall) {
+    @objc public func discover(_ call: CAPPluginCall) {
         var type = call.getString("type") ?? "_http._tcp."
         if type.last != "." { type += "." }
 
