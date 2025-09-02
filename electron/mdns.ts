@@ -24,7 +24,6 @@ import type {
  * - TXT records are forwarded as strings when present.
  */
 export class mDNS {
-
   //<editor-fold desc="Init/Destroy">
   private ipcRegistered = false;
   private registerIpc(): void {
@@ -33,10 +32,12 @@ export class mDNS {
       ipcMain.removeHandler('mdns:startBroadcast');
       ipcMain.removeHandler('mdns:stopBroadcast');
       ipcMain.removeHandler('mdns:discover');
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     ipcMain.handle('mdns:startBroadcast', (_evt, o: MdnsBroadcastOptions) => this.startBroadcast(o));
-    ipcMain.handle('mdns:stopBroadcast',  () => this.stopBroadcast());
-    ipcMain.handle('mdns:discover',       (_evt, o: MdnsDiscoverOptions) => this.discover(o));
+    ipcMain.handle('mdns:stopBroadcast', () => this.stopBroadcast());
+    ipcMain.handle('mdns:discover', (_evt, o: MdnsDiscoverOptions) => this.discover(o));
     this.ipcRegistered = true;
   }
 
@@ -46,7 +47,9 @@ export class mDNS {
       ipcMain.removeHandler('mdns:startBroadcast');
       ipcMain.removeHandler('mdns:stopBroadcast');
       ipcMain.removeHandler('mdns:discover');
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     this.ipcRegistered = false;
   }
   /** Manual IPC registration (if you set autoRegisterIpc: false). Idempotent. */
@@ -57,7 +60,11 @@ export class mDNS {
   async destroy(): Promise<void> {
     this.unregisterIpc();
     await this.stopBroadcast(); // no-op safe
-    try { this.bonjour.destroy(); } catch (err) { console.warn('[mDNS] bonjour.destroy error:', err); }
+    try {
+      this.bonjour.destroy();
+    } catch (err) {
+      console.warn('[mDNS] bonjour.destroy error:', err);
+    }
   }
 
   //</editor-fold>
@@ -70,10 +77,13 @@ export class mDNS {
     return err instanceof Error ? err.message : String(err);
   }
 
-  private normalize(name: string): string { return name.replace(/ \(\d+\)$/, ''); }
+  private normalize(name: string): string {
+    return name.replace(/ \(\d+\)$/, '');
+  }
   private matchesTarget(candidate: string, target?: string | null): boolean {
     if (!target) return true;
-    const c = this.normalize(candidate), t = this.normalize(target);
+    const c = this.normalize(candidate),
+      t = this.normalize(target);
     return c === t || c.startsWith(t);
   }
   private parseType(typeWithDot?: string): { type: string; protocol: 'tcp' | 'udp' } {
@@ -82,7 +92,9 @@ export class mDNS {
     if (!m) return { type: 'http', protocol: 'tcp' };
     return { type: m[1], protocol: m[2] as 'tcp' | 'udp' };
   }
-  private toFullType(type: string, protocol: 'tcp' | 'udp'): string { return `_${type}._${protocol}.`; }
+  private toFullType(type: string, protocol: 'tcp' | 'udp'): string {
+    return `_${type}._${protocol}.`;
+  }
 
   private hasCbStop(x: unknown): x is { stop: (cb?: () => void) => void } {
     return !!x && typeof (x as any).stop === 'function';
@@ -91,12 +103,24 @@ export class mDNS {
     if (!svc || !this.hasCbStop(svc)) return;
     try {
       await new Promise<void>((res) => {
-        try { svc.stop(() => res()); } catch (e) { console.warn('[mDNS] service.stop threw:', e); res(); }
+        try {
+          svc.stop(() => res());
+        } catch (e) {
+          console.warn('[mDNS] service.stop threw:', e);
+          res();
+        }
       });
-    } catch (err) { console.warn('[mDNS] service.stop error:', err); }
+    } catch (err) {
+      console.warn('[mDNS] service.stop error:', err);
+    }
   }
   private safeStopBrowser(b: Browser | null | undefined): void {
-    if (!b) return; try { b.stop(); } catch (err) { console.warn('[mDNS] browser.stop error:', err); }
+    if (!b) return;
+    try {
+      b.stop();
+    } catch (err) {
+      console.warn('[mDNS] browser.stop error:', err);
+    }
   }
 
   // ----------------------------- API -----------------------------
@@ -109,7 +133,12 @@ export class mDNS {
     const { type, protocol } = this.parseType(options.type);
     return new Promise<MdnsBroadcastResult>((resolve) => {
       let settled = false;
-      const safeResolve = (r: MdnsBroadcastResult) => { if (!settled) { settled = true; resolve(r); } };
+      const safeResolve = (r: MdnsBroadcastResult) => {
+        if (!settled) {
+          settled = true;
+          resolve(r);
+        }
+      };
 
       try {
         const svc = this.bonjour.publish({
@@ -121,12 +150,26 @@ export class mDNS {
         });
 
         const onUp = () => {
-          try { svc.removeListener('up', onUp); svc.removeListener('error', onError); } catch { /* ignore */ }
+          try {
+            svc.removeListener('up', onUp);
+            svc.removeListener('error', onError);
+          } catch {
+            /* ignore */
+          }
           safeResolve({ publishing: true, name: svc.name || '', error: false, errorMessage: null });
         };
         const onError = (err: unknown) => {
-          try { svc.removeListener('up', onUp); svc.removeListener('error', onError); } catch { /* ignore */ }
-          try { if (this.hasCbStop(svc)) svc.stop(); } catch (e) { console.warn('[mDNS] publish stop on error:', e); }
+          try {
+            svc.removeListener('up', onUp);
+            svc.removeListener('error', onError);
+          } catch {
+            /* ignore */
+          }
+          try {
+            if (this.hasCbStop(svc)) svc.stop();
+          } catch (e) {
+            console.warn('[mDNS] publish stop on error:', e);
+          }
           safeResolve({ publishing: false, name: '', error: true, errorMessage: this.toErr(err) });
         };
 
@@ -175,8 +218,14 @@ export class mDNS {
       let timer: NodeJS.Timeout | null = null;
 
       const finish = () => {
-        if (browser) { this.safeStopBrowser(browser); browser = null; }
-        if (timer) { clearTimeout(timer); timer = null; }
+        if (browser) {
+          this.safeStopBrowser(browser);
+          browser = null;
+        }
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
         resolve({
           error: hadError,
           errorMessage: errMsg,

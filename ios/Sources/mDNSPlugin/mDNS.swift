@@ -301,7 +301,7 @@ extension MDNS: NetServiceDelegate {
         cb?(.success(sender.name))
     }
 
-    public func netService(_ sender: NetService, didNotPublish errorDict: [String : NSNumber]) {
+    public func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
         let cb = publishCompletion
         publishCompletion = nil
         let code = (errorDict[NetService.errorCode] as NSNumber?)?.intValue ?? -1
@@ -335,7 +335,7 @@ extension MDNS: NetServiceDelegate {
         }
     }
 
-    public func netService(_ sender: NetService, didNotResolve errorDict: [String : NSNumber]) {
+    public func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
         // Drop the unresolved service and try to continue with others.
         resolveMap.removeValue(forKey: sender)
         scheduleSettleDebounce()
@@ -370,7 +370,7 @@ extension MDNS: NetServiceBrowserDelegate {
         // Not critical for snapshot output; ignore.
     }
 
-    public func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String : NSNumber]) {
+    public func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
         // Gracefully complete with whatever we have (plugin will surface error=true).
         finishDiscovery()
     }

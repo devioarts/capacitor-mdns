@@ -119,8 +119,6 @@ export interface MdnsDiscoverOptions {
   useNW?: boolean;
 }
 
-
-
 /**
  * Result of startBroadcast(). Indicates whether advertising is active
  * and the final service name. On failure, `error` is true and `errorMessage`

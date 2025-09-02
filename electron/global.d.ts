@@ -14,15 +14,15 @@ declare global {
      * Primary name with the same casing as iOS jsName.
      */
     mDNS: {
-      startBroadcast(options: MdnsBroadcastOptions): Promise<MdnsBroadcastResult>
-      stopBroadcast(): Promise<MdnsStopResult>
-      discover(options?: MdnsDiscoverOptions): Promise<MdnsDiscoverResult>
-    }
+      startBroadcast(options: MdnsBroadcastOptions): Promise<MdnsBroadcastResult>;
+      stopBroadcast(): Promise<MdnsStopResult>;
+      discover(options?: MdnsDiscoverOptions): Promise<MdnsDiscoverResult>;
+    };
     /**
      * Lowercase alias for convenience.
      */
-    mdns: Window['mDNS']
+    mdns: Window['mDNS'];
   }
 }
 
-export {}
+export {};

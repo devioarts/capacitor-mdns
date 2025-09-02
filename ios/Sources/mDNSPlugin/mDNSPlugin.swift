@@ -21,8 +21,8 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
     public let jsName = "mDNS"
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "startBroadcast", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "stopBroadcast",  returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "discover",       returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stopBroadcast", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "discover", returnType: CAPPluginReturnPromise)
     ]
 
     private let mdns = MDNS()
