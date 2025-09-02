@@ -247,6 +247,12 @@ public class MDNS: NSObject {
             nwBrowser = nil
         }
         #endif
+        // Stop all in-flight resolvers as well (best-effort).
+        for (svc, _) in resolveMap {
+            svc.stop()
+            svc.delegate = nil
+        }
+        resolveMap.removeAll()
         nsBrowser?.stop()
         nsBrowser?.delegate = nil
         nsBrowser = nil

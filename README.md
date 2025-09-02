@@ -13,11 +13,6 @@ npx cap sync
 #### /android/app/src/main/AndroidManifest.xml
 ```xml
 <uses-permission android:name="android.permission.INTERNET" />
-<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-<!-- Android 12+ -->
-<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-<application android:usesCleartextTraffic="true"></application>
 ```
 
 ## iOS
@@ -50,14 +45,28 @@ npm i bonjour-service@1.3.0
 
 ```typescript
 // ...
-// THIS LINE IS IMPORTANT FOR PLUGIN!
-import { registerMdnsIpc } from '@devioarts/capacitor-mdns/electron/mdns'
+import { mDNS } from '@devioarts/capacitor-mdns/electron/mdns'
+// ...
+const mdns = new mDNS();
 // ...
 app.whenReady().then(() => {
-  // THIS LINE IS IMPORTANT FOR PLUGIN!
-  registerMdnsIpc();
-  //...
+	//...
+	mdns.init();
+	//...
 });
+/* Or you can use app.on:ready
+app.on('ready', () => {
+	// ...
+	mdns.init();
+	// ...
+});
+*/
+
+app.on('before-quit', async () => {
+	// ...
+	mdns.destroy();
+	// ...
+})
 //...
 ```
 ### electron/preload.cjs

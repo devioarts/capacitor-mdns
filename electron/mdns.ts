@@ -1,6 +1,6 @@
 import type { Service, Browser } from 'bonjour-service';
 import Bonjour from 'bonjour-service';
-import { ipcMain, app } from 'electron';
+import { ipcMain } from 'electron';
 
 import type {
   MdnsBroadcastOptions,
@@ -9,7 +9,7 @@ import type {
   MdnsDiscoverResult,
   MdnsService,
   MdnsStopResult,
-} from '../src/definitions';
+} from '../src';
 
 /**
  * Electron main-process implementation of the mDNS/Bonjour functionality.
@@ -24,9 +24,46 @@ import type {
  * - TXT records are forwarded as strings when present.
  */
 export class mDNS {
+
+  //<editor-fold desc="Init/Destroy">
+  private ipcRegistered = false;
+  private registerIpc(): void {
+    if (this.ipcRegistered) return;
+    try {
+      ipcMain.removeHandler('mdns:startBroadcast');
+      ipcMain.removeHandler('mdns:stopBroadcast');
+      ipcMain.removeHandler('mdns:discover');
+    } catch { /* ignore */ }
+    ipcMain.handle('mdns:startBroadcast', (_evt, o: MdnsBroadcastOptions) => this.startBroadcast(o));
+    ipcMain.handle('mdns:stopBroadcast',  () => this.stopBroadcast());
+    ipcMain.handle('mdns:discover',       (_evt, o: MdnsDiscoverOptions) => this.discover(o));
+    this.ipcRegistered = true;
+  }
+
+  private unregisterIpc(): void {
+    if (!this.ipcRegistered) return;
+    try {
+      ipcMain.removeHandler('mdns:startBroadcast');
+      ipcMain.removeHandler('mdns:stopBroadcast');
+      ipcMain.removeHandler('mdns:discover');
+    } catch { /* ignore */ }
+    this.ipcRegistered = false;
+  }
+  /** Manual IPC registration (if you set autoRegisterIpc: false). Idempotent. */
+  init(): void {
+    this.registerIpc();
+  }
+
+  async destroy(): Promise<void> {
+    this.unregisterIpc();
+    await this.stopBroadcast(); // no-op safe
+    try { this.bonjour.destroy(); } catch (err) { console.warn('[mDNS] bonjour.destroy error:', err); }
+  }
+
+  //</editor-fold>
+
   private bonjour = new Bonjour();
   private advertiser?: Service;
-  private registered = false;
 
   // ----------------------------- utils -----------------------------
   private toErr(err: unknown): string {
@@ -177,31 +214,5 @@ export class mDNS {
         finish();
       }
     });
-  }
-
-  // ----------------------------- lifecycle / IPC -----------------------------
-  registerIpc(): void {
-    if (this.registered) return;
-    ipcMain.handle('mdns:startBroadcast', (_evt, o: MdnsBroadcastOptions) => this.startBroadcast(o));
-    ipcMain.handle('mdns:stopBroadcast',  () => this.stopBroadcast());
-    ipcMain.handle('mdns:discover',       (_evt, o: MdnsDiscoverOptions) => this.discover(o));
-    this.registered = true;
-  }
-
-  attachOnReady(): void {
-    if (app.isReady()) { this.registerIpc(); return; }
-    const onReady = () => { try { this.registerIpc(); } finally { app.removeListener('ready', onReady); } };
-    app.on('ready', onReady);
-  }
-
-  async dispose(): Promise<void> {
-    await this.stopBroadcast();
-    try { this.bonjour.destroy(); } catch (err) { console.warn('[mDNS] bonjour.destroy error:', err); }
-    try {
-      ipcMain.removeHandler('mdns:startBroadcast');
-      ipcMain.removeHandler('mdns:stopBroadcast');
-      ipcMain.removeHandler('mdns:discover');
-    } catch { /* ignore */ }
-    this.registered = false;
   }
 }

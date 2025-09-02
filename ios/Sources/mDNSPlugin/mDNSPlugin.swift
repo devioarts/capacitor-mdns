@@ -101,8 +101,9 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
         let type = normalizeType(call.getString("type"))
         let targetName = call.getString("name")
         let timeout = call.getInt("timeout") ?? 3000
+        let useNW = call.getBool("useNW") ?? true
 
-        mdns.discover(type: type, name: targetName, timeoutMs: timeout) { result in
+        mdns.discover(type: type, name: targetName, timeoutMs: timeout, useNW: useNW) { result in
             switch result {
             case .success(let services):
                 call.resolve([
