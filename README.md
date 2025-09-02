@@ -4,6 +4,7 @@ mDNS plugin for Capacitor that supports Bonjour/mDNS advertisements and discover
 
 #### Supported platforms: &#x2713; iOS &#x2713; Android &#x2713; Electron
 
+#### Example of usage with demo: [Demo app](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-mdns)
 
 ## Install
 
