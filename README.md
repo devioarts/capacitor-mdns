@@ -1,6 +1,9 @@
 # @devioarts/capacitor-mdns
 
-mDNS plugin for CapacitorJS
+mDNS plugin for Capacitor that supports Bonjour/mDNS advertisements and discovery.
+
+#### Supported platforms: &#x2713; iOS &#x2713; Android &#x2713; Electron
+
 
 ## Install
 
@@ -54,7 +57,7 @@ app.whenReady().then(() => {
 	mdns.init();
 	//...
 });
-/* Or you can use app.on:ready
+/* Or you can use app.on:ready (whenReady is recomended)
 app.on('ready', () => {
 	// ...
 	mdns.init();
@@ -239,6 +242,8 @@ Values are UTF-8 strings; binary payloads are not supported by this API.
 
 Construct a type with a set of properties K of type T
 
-<code>{ [P in K]: T; }</code>
+<code>{
+ [P in K]: T;
+ }</code>
 
 </docgen-api>
