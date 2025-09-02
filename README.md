@@ -3,8 +3,7 @@
 mDNS plugin for Capacitor that supports Bonjour/mDNS advertisements and discovery.
 
 #### Supported platforms: &#x2713; iOS &#x2713; Android &#x2713; Electron
-
-#### Example of usage with demo: [Demo app](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-mdns)
+#### Demo application: [here](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-mdns)
 
 ## Install
 
@@ -83,6 +82,7 @@ const {createMDNSAPI} = require("@devioarts/capacitor-mdns/electron/mdns-bridge.
 contextBridge.exposeInMainWorld('mDNS', createMDNSAPI({ ipcRenderer }));
 contextBridge.exposeInMainWorld('mdns', createMDNSAPI({ ipcRenderer })) // alias
 ```
+
 ---
 ## API
 
