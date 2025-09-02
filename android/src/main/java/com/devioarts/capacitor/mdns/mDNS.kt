@@ -151,12 +151,9 @@ class mDNS(
             override fun onDiscoveryStopped(serviceType: String) { /* no-op */ }
 
             override fun onServiceFound(si: NsdServiceInfo) {
-                // Android NSD: normalized exact/prefix match
                 if (targetName != null && !matchesTarget(si.serviceName)) return
 
-                // Keep a reference to the current DiscoveryListener instance
                 val discoveryListener = this
-
                 nsd.resolveService(si, object : NsdManager.ResolveListener {
                     override fun onResolveFailed(s: NsdServiceInfo, errorCode: Int) { /* ignore */ }
 
@@ -169,7 +166,7 @@ class mDNS(
                         )
                         found.add(item)
 
-                        // Early-exit: if target requested and this one matches, stop immediately.
+                        // Early-exit for exact/prefix target match.
                         if (targetName != null && matchesTarget(s.serviceName)) {
                             safeStopDiscovery(discoveryListener)
                             if (!result.isCompleted) result.complete(found.toList())
@@ -177,7 +174,6 @@ class mDNS(
                     }
                 })
             }
-
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) { /* no-op */ }
         }

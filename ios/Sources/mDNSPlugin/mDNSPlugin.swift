@@ -5,9 +5,14 @@ import Foundation
  * Capacitor bridge for the iOS mDNS plugin.
  *
  * Responsibilities:
- * - Keep a single MDNS manager instance per plugin.
- * - Map JS calls to native methods and normalize responses.
- * - Avoid long-running work here; heavy lifting lives in `MDNS`.
+ * - Exposes the native MDNS manager to JavaScript.
+ * - Validates and normalizes params (ensures trailing dot in type, sensible defaults).
+ * - Never rejects on runtime errors; always resolves with { error, errorMessage }.
+ *
+ * Methods:
+ * - startBroadcast({ type?, name?, port, txt? })
+ * - stopBroadcast()
+ * - discover({ type?, name?, timeout? })
  */
 @objc(mDNSPlugin)
 public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
@@ -16,81 +21,104 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
     public let jsName = "mDNS"
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "startBroadcast", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "stopBroadcast", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "discover", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stopBroadcast",  returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "discover",       returnType: CAPPluginReturnPromise),
     ]
 
-    /// Single manager instance used by this plugin.
     private let mdns = MDNS()
 
-    /**
-     * Start advertising a Bonjour/mDNS service.
-     *
-     * Expected options:
-     *   - type?: string = "_http._tcp."  (trailing dot is enforced)
-     *   - id?:   string = "CapacitorMDNS" (non-empty preferred)
-     *   - domain?: string = "local."
-     *   - port: number  (> 0)
-     *   - txt?: Record<string,string>
-     *
-     * Resolves with: { publishing: true, name: string }
-     * Note: The promise resolves after the system confirms publish (NetService.didPublish),
-     * so `name` is the final instance name (may include " (n)").
-     */
+    // MARK: - Helpers
+
+    private func jnull(_ v: String?) -> Any {
+        return v ?? NSNull()
+    }
+
+    private func normalizeType(_ raw: String?) -> String {
+        var t = raw ?? "_http._tcp."
+        if t.last != "." { t += "." }
+        return t
+    }
+
+    // MARK: - API
+
+    /// startBroadcast({ type?, name?, port, txt? })
     @objc public func startBroadcast(_ call: CAPPluginCall) {
-        var type = call.getString("type") ?? "_http._tcp."
-        if type.last != "." { type += "." }
-
-        // Prefer a non-empty 'id'; otherwise fall back to a constant.
-        let rawId = call.getString("id")?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name  = (rawId?.isEmpty == false ? rawId! : "CapacitorMDNS")
-
+        let type = normalizeType(call.getString("type"))
+        let name = (call.getString("name")?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? "DevIOArtsMDNS"
         let port = call.getInt("port") ?? 0
-        guard port > 0 else { call.reject("Missing/invalid port"); return }
+        let txt  = call.getObject("txt") as? [String: String]
 
-        let domain = call.getString("domain") ?? "local."
-        let txt    = call.getObject("txt") as? [String: String]
+        guard port > 0 else {
+            call.resolve([
+                "publishing": false,
+                "name": "",
+                "error": true,
+                "errorMessage": "Missing/invalid port"
+            ])
+            return
+        }
 
-        mdns.broadcast(type: type, name: name, domain: domain, port: port, txt: txt) { result in
+        mdns.broadcast(type: type, name: name, port: port, txt: txt) { result in
             switch result {
             case .success(let finalName):
-                call.resolve(["publishing": true, "name": finalName])
+                call.resolve([
+                    "publishing": true,
+                    "name": finalName,
+                    "error": false,
+                    "errorMessage": NSNull()
+                ])
             case .failure(let err):
-                call.reject(err.localizedDescription)
+                call.resolve([
+                    "publishing": false,
+                    "name": "",
+                    "error": true,
+                    "errorMessage": self.jnull(err.localizedDescription)
+                ])
             }
         }
     }
 
-    /**
-     * Stop advertising the currently registered service (no-op if none).
-     * Resolves with: { publishing: false }
-     */
+    /// stopBroadcast()
     @objc public func stopBroadcast(_ call: CAPPluginCall) {
-        mdns.stopBroadcast()
-        call.resolve(["publishing": false])
+        do {
+            try mdns.stopBroadcast()
+            call.resolve([
+                "publishing": false,
+                "error": false,
+                "errorMessage": NSNull()
+            ])
+        } catch {
+            call.resolve([
+                "publishing": false,
+                "error": true,
+                "errorMessage": jnull(error.localizedDescription)
+            ])
+        }
     }
 
-    /**
-     * Discover services and return a normalized list.
-     *
-     * Expected options:
-     *   - type?: string = "_http._tcp."
-     *   - id?:   string (optional instance-name filter; exact OR prefix match)
-     *   - timeoutMs?: number = 3000
-     *   - useNW?: boolean = true  (use NWBrowser when available)
-     *
-     * Resolves with: { services: Array<{ name,type,domain,port,hosts?,txt? }> }
-     */
+    /// discover({ type?, name?, timeout? })
     @objc public func discover(_ call: CAPPluginCall) {
-        var type = call.getString("type") ?? "_http._tcp."
-        if type.last != "." { type += "." }
+        let type = normalizeType(call.getString("type"))
+        let targetName = call.getString("name")
+        let timeout = call.getInt("timeout") ?? 3000
 
-        let targetId = call.getString("id")
-        let timeoutMs = call.getInt("timeoutMs") ?? 3000
-        let useNW = call.getBool("useNW") ?? true
-
-        mdns.discover(type: type, id: targetId, timeoutMs: timeoutMs, useNW: useNW) { services in
-            call.resolve(["services": services])
+        mdns.discover(type: type, name: targetName, timeoutMs: timeout) { result in
+            switch result {
+            case .success(let services):
+                call.resolve([
+                    "error": false,
+                    "errorMessage": NSNull(),
+                    "servicesFound": services.count,
+                    "services": services
+                ])
+            case .failure(let err):
+                call.resolve([
+                    "error": true,
+                    "errorMessage": self.jnull(err.localizedDescription),
+                    "servicesFound": 0,
+                    "services": []
+                ])
+            }
         }
     }
 }

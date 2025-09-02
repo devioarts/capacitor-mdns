@@ -1,9 +1,11 @@
 // electron/global.d.ts
 import type {
   MdnsBroadcastOptions,
+  MdnsBroadcastResult,
   MdnsDiscoverOptions,
-  MdnsService,
-} from '../src' // ← uprav cestu dle struktury
+  MdnsDiscoverResult,
+  MdnsStopResult,
+} from '../src/definitions'; // Types only; no runtime import
 
 declare global {
   interface Window {
@@ -12,9 +14,9 @@ declare global {
      * Primary name with the same casing as iOS jsName.
      */
     mDNS: {
-      startBroadcast(options: MdnsBroadcastOptions): Promise<{ publishing: boolean; name: string }>
-      stopBroadcast(): Promise<{ publishing: boolean }>
-      discover(options?: MdnsDiscoverOptions): Promise<{ services: MdnsService[] }>
+      startBroadcast(options: MdnsBroadcastOptions): Promise<MdnsBroadcastResult>
+      stopBroadcast(): Promise<MdnsStopResult>
+      discover(options?: MdnsDiscoverOptions): Promise<MdnsDiscoverResult>
     }
     /**
      * Lowercase alias for convenience.

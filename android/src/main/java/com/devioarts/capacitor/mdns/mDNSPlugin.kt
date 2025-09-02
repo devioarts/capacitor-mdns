@@ -5,6 +5,7 @@ import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.PluginMethod
 import kotlinx.coroutines.*
 import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Capacitor Android bridge for the mDNS plugin.
@@ -12,19 +13,26 @@ import org.json.JSONArray
  * Responsibilities:
  * - Own a single instance of the mDNS manager (Android NSD wrapper).
  * - Translate Capacitor calls (JS) to Kotlin calls and normalize results.
- * - Handle lifecycle cleanup to avoid leaked listeners/coroutines.
+ * - Never reject for runtime errors; always resolve with { error, errorMessage }.
  *
- * Notes:
- * - The plugin mirrors the iOS API: startBroadcast / stopBroadcast / discover.
- * - TXT records are not exposed by Android NSD, therefore discovery result omits TXT on Android.
+ * Parameters (strict, no legacy):
+ * - startBroadcast: { type?: string, name?: string, port: number, txt?: Record<string,string> }  // txt ignored by Android
+ * - stopBroadcast:  {}
+ * - discover:       { type?: string, name?: string, timeout?: number }
+ *
+ * Return shapes:
+ * - startBroadcast -> { publishing: boolean, name: string, error: boolean, errorMessage: string|null }
+ * - stopBroadcast  -> { publishing: false, error: boolean, errorMessage: string|null }
+ * - discover       -> {
+ *       error: boolean, errorMessage: string|null,
+ *       servicesFound: number,
+ *       services: Array<{ name, type, domain: "local.", port, hosts?: string[] }>
+ *   }
  */
 @CapacitorPlugin(name = "mDNS")
 class mDNSPlugin : Plugin() {
 
-    /** MainScope is enough; we cancel it in handleOnDestroy() to avoid leaks. */
     private val scope = MainScope()
-
-    /** Lazily created in load(); throws if Android context is somehow unavailable. */
     private lateinit var mdns: mDNS
 
     override fun load() {
@@ -33,104 +41,116 @@ class mDNSPlugin : Plugin() {
     }
 
     override fun handleOnDestroy() {
-        // Make sure to release NSD listeners and cancel any outstanding coroutines.
         mdns.close()
         scope.cancel()
     }
 
-    // ---------- Public API: mirrors iOS ----------
+    // ----------------------- Helpers -----------------------
+
+    private fun toErrorMessage(t: Throwable?): String =
+        t?.message ?: "Unknown error"
+
+    private fun jnull(msg: String?): Any = msg ?: JSONObject.NULL
+
+    private fun jsResultBroadcast(publishing: Boolean, name: String, error: Boolean, msg: String?): JSObject =
+        JSObject().put("publishing", publishing)
+            .put("name", name)
+            .put("error", error)
+            .put("errorMessage", jnull(msg))
+
+    private fun jsResultStop(error: Boolean, msg: String?): JSObject =
+        JSObject().put("publishing", false)
+            .put("error", error)
+            .put("errorMessage", jnull(msg))
+
+    private fun jsResultDiscover(error: Boolean, msg: String?, services: JSONArray): JSObject =
+        JSObject()
+            .put("error", error)
+            .put("errorMessage", jnull(msg))
+            .put("servicesFound", services.length())
+            .put("services", services)
+
+    // ----------------------- API -----------------------
 
     /**
      * Start advertising a Bonjour/mDNS service.
-     *
-     * Expected options (from JS/TS):
-     *   {
-     *     type?: string = "_cap-mdns._tcp.",   // trailing dot is appended if missing
-     *     id?: string = packageName,           // service instance name
-     *     port: number                         // required, > 0
-     *   }
-     *
-     * Resolves with: { publishing: true, name: string }
+     * - type: default "_http._tcp."
+     * - name: default packageName
+     * - port: required (> 0)
      */
     @PluginMethod
     fun startBroadcast(call: PluginCall) {
         val type = call.getString("type") ?: "_http._tcp."
-        val name = call.getString("id") ?: (context?.packageName ?: "mDNS")
+        val name = call.getString("name") ?: (context?.packageName ?: "DevIOArtsMDNS")
         val port = call.getInt("port") ?: 0
+
         if (port <= 0) {
-            call.reject("Missing/invalid port"); return
+            call.resolve(jsResultBroadcast(false, "", true, "Missing/invalid port"))
+            return
         }
+
         try {
             mdns.broadcast(
                 typeRaw = type,
                 name = name,
                 port = port,
                 onSuccess = { published ->
-                    // "name" may differ if the OS uniquifies the instance (e.g., " (2)")
-                    call.resolve(JSObject().put("publishing", true).put("name", published))
+                    call.resolve(jsResultBroadcast(true, published, false, null))
                 },
-                onError = { err -> call.reject(err.message ?: "Registration error") }
+                onError = { err ->
+                    call.resolve(jsResultBroadcast(false, "", true, toErrorMessage(err)))
+                }
             )
         } catch (t: Throwable) {
-            call.reject(t.message)
+            call.resolve(jsResultBroadcast(false, "", true, toErrorMessage(t)))
         }
     }
 
     /**
-     * Stop advertising the currently registered service. No-op if nothing is registered.
-     *
-     * Resolves with an empty object for convenience.
+     * Stop advertising the currently registered service.
      */
     @PluginMethod
     fun stopBroadcast(call: PluginCall) {
-        mdns.stopBroadcast()
-        call.resolve(JSObject().put("publishing", false))
+        try {
+            mdns.stopBroadcast()
+            call.resolve(jsResultStop(false, null))
+        } catch (t: Throwable) {
+            call.resolve(jsResultStop(true, toErrorMessage(t)))
+        }
     }
 
     /**
-     * Discover services of a given type and optionally filter by instance name.
-     *
-     * Expected options:
-     *   {
-     *     type?: string = "_http._tcp.",
-     *     id?: string,               // normalized exact or prefix match
-     *     timeoutMs?: number = 3000
-     *   }
-     *
-     * Resolves with:
-     *   {
-     *     services: Array<{
-     *       name: string,
-     *       type: string,
-     *       domain?: string,   // "local." (normalized for parity with iOS)
-     *       hosts?: string[],  // single item on Android, normalized to array
-     *       port: number
-     *     }>
-     *   }
+     * Discover services of a given type and optional name filter (exact/prefix, normalized).
+     * - type: default "_http._tcp."
+     * - name: optional filter
+     * - timeout: default 3000
      */
     @PluginMethod
     fun discover(call: PluginCall) {
         val type = call.getString("type") ?: "_http._tcp."
-        val targetId = call.getString("id") // optional exact name (Android NSD does not handle "(n)" suffix normalization)
-        val timeoutMs = call.getInt("timeoutMs") ?: 3000
+        val targetName = call.getString("name")
+        val timeout = call.getInt("timeout") ?: 3000
 
         scope.launch {
             try {
-                val services = mdns.discover(type, targetId, timeoutMs)
-                val arr = JSONArray(services.map { s ->
+                val list = mdns.discover(type, targetName, timeout)
+                val arr = JSONArray(list.map { s ->
                     JSObject().apply {
                         put("name", s.name)
-                        put("type", s.type)
-                        // Android NSD gives a single numeric host; we normalize it to hosts: string[]
-                        put("hosts", JSONArray().put(s.host ?: ""))
+                        put("type", s.type)         // Android returns full type with dot
+                        put("domain", "local.")     // NSD is mDNS only
+                        // normalize hosts to [] or [addr]
+                        val hosts = JSONArray()
+                        val addr = s.host
+                        if (!addr.isNullOrEmpty()) hosts.put(addr)
+                        put("hosts", hosts)
                         put("port", s.port)
-                        // Android NSD does not provide TXT via public APIs; omit it for parity with iOS schema.
-                        put("domain", "local.")
+                        // TXT not available via NSD -> omitted on Android
                     }
                 })
-                call.resolve(JSObject().put("services", arr))
+                call.resolve(jsResultDiscover(false, null, arr))
             } catch (t: Throwable) {
-                call.reject(t.message ?: "Discovery error")
+                call.resolve(jsResultDiscover(true, toErrorMessage(t), JSONArray()))
             }
         }
     }

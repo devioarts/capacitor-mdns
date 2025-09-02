@@ -1,6 +1,6 @@
 {
   "name": "@devioarts/capacitor-mdns",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "mDNS plugin for CapacitorJS",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",

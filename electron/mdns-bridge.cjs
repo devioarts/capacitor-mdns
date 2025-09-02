@@ -8,8 +8,8 @@ module.exports.createMDNSAPI = ({ ipcRenderer }) => {
   return {
     /**
      * Start advertising a Bonjour/mDNS service.
-     * @param {{type?: string, id?: string, port: number, domain?: string, txt?: Record<string,string>}} options
-     * @returns {Promise<{publishing: boolean, name: string}>}
+     * @param {{type?: string, name: string, port: number, txt?: Record<string,string>}} options
+     * @returns {Promise<{publishing: boolean, name: string, error: boolean, errorMessage: string|null}>}
      */
     startBroadcast: (options) => ipcRenderer.invoke('mdns:startBroadcast', options),
 

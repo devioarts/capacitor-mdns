@@ -33,11 +33,11 @@ export interface MdnsService {
   port: number;
 
   /**
-   * Resolved numeric IP addresses (IPv4/IPv6). Empty when resolution fails.
+   * Resolved numeric IP addresses (IPv4/IPv6).
    * @example
    * `["192.168.1.42", "fe80::1234:abcd:..."]`
    */
-  hosts?: string[];
+  hosts: string[];
 
   /**
    * TXT dictionary (key → value). Usually present on iOS; Android NSD does not populate this.
@@ -51,7 +51,7 @@ export interface MdnsService {
  *
  * @remarks
  * - The `type` **must** end with a dot (`.`). If omitted, the implementation appends it.
- * - Instance `id` should be short and human-readable; the OS may append `" (n)"` to ensure uniqueness.
+ * - Instance `name` should be short and human-readable; the OS may append `" (n)"` to ensure uniqueness.
  * - Android NSD does not expose TXT records to other apps; advertising TXT is supported on iOS.
  *
  * @public
@@ -66,15 +66,8 @@ export interface MdnsBroadcastOptions {
 
   /**
    * Service instance name.
-   * @defaultValue `"CapacitorMDNS"`
    */
-  id?: string;
-
-  /**
-   * Bonjour domain.
-   * @defaultValue `"local."`
-   */
-  domain?: string;
+  name: string;
 
   /**
    * TCP port to advertise.
@@ -103,27 +96,75 @@ export interface MdnsDiscoverOptions {
   /**
    * Service type (including the trailing dot).
    * @defaultValue `"_http._tcp."`
-   * @example `"_lancomm._tcp."`
+   * @example `"_comm._tcp."`
    */
   type?: string;
 
   /**
    * Optional instance name filter (prefix-safe).
-   * @example `"my.app.id"`
+   * @example `"MyAppName"`
    */
-  id?: string;
+  name?: string;
 
   /**
    * Discovery timeout in milliseconds.
    * @defaultValue `3000`
    */
-  timeoutMs?: number;
+  timeout?: number;
 
   /**
    * iOS-only hint to use `NWBrowser` instead of `NetServiceBrowser`.
    * @defaultValue `true`
    */
   useNW?: boolean;
+}
+
+
+
+/**
+ * Result of startBroadcast(). Indicates whether advertising is active
+ * and the final service name. On failure, `error` is true and `errorMessage`
+ * describes the issue.
+ * @public
+ */
+export interface MdnsBroadcastResult {
+  /** True if the operation failed. */
+  error: boolean;
+  /** Error description or null on success. */
+  errorMessage: string | null;
+  /** Final (possibly uniquified) service instance name. Empty on failure. */
+  name: string;
+  /** Whether the advertiser is currently active. */
+  publishing: boolean;
+}
+
+/**
+ * Result of discover(). Contains normalized services and error information.
+ * @public
+ */
+export interface MdnsDiscoverResult {
+  /** True if discovery encountered an error (partial results may still be present). */
+  error: boolean;
+  /** Error description or null when no error occurred. */
+  errorMessage: string | null;
+  /** Convenience count equal to services.length. */
+  servicesFound: number;
+  /** Normalized list of discovered services. */
+  services: MdnsService[];
+}
+
+/**
+ * Result of stopBroadcast(). Indicates whether the advertiser is active
+ * after the call (normally false) and includes error information.
+ * @public
+ */
+export interface MdnsStopResult {
+  /** True if an error occurred while stopping. */
+  error: boolean;
+  /** Error description or null on success. */
+  errorMessage: string | null;
+  /** Whether the advertiser remains active (should be false on success). */
+  publishing: boolean;
 }
 
 /**
@@ -134,10 +175,10 @@ export interface MdnsDiscoverOptions {
  * import { mDNS } from 'capacitor-mdns';
  *
  * // Start advertising
- * await mDNS.startBroadcast({ type: '_http._tcp.', id: 'my.app.id', port: 9235 });
+ * await mDNS.startBroadcast({ type: '_http._tcp.', name: 'my.app.id', port: 9235 });
  *
  * // Discover services
- * const { services } = await mDNS.discover({ type: '_http._tcp.', timeoutMs: 3000 });
+ * const { services } = await mDNS.discover({ type: '_http._tcp.', timeout: 3000 });
  *
  * // Stop advertising
  * await mDNS.stopBroadcast();
@@ -150,24 +191,24 @@ export interface mDNSPlugin {
    * Start advertising a Bonjour/mDNS service.
    *
    * @param options - {@link MdnsBroadcastOptions}
-   * @returns Promise resolving to `{ publishing: boolean }` (`true` on success).
+   * @returns Promise resolving to `MdnsBroadcastResult` (`true` on success).
    */
-  startBroadcast(options: MdnsBroadcastOptions): Promise<{name:string, publishing: boolean }>;
+  startBroadcast(options: MdnsBroadcastOptions): Promise<MdnsBroadcastResult>;
 
   /**
    * Stop advertising the currently registered service (no-op if none).
    *
-   * @returns Promise resolving to `{ publishing: boolean }`.
+   * @returns Promise resolving to `MdnsStopResult`.
    * @remarks The `publishing` flag may be `false` after a successful stop.
    */
-  stopBroadcast(): Promise<{ publishing: boolean }>;
+  stopBroadcast(): Promise<MdnsStopResult>;
 
   /**
    * Discover services of a given type and optionally filter by instance name.
    *
    * @param options - {@link MdnsDiscoverOptions}
-   * @returns Promise resolving to `{ services: MdnsService[] }`.
+   * @returns Promise resolving to `MdnsDiscoverResult`.
    * @remarks The result list is normalized across platforms. On Android, `txt` is typically absent.
    */
-  discover(options?: MdnsDiscoverOptions): Promise<{ services: MdnsService[] }>;
+  discover(options?: MdnsDiscoverOptions): Promise<MdnsDiscoverResult>;
 }

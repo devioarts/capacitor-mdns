@@ -1,418 +1,430 @@
 import Foundation
+import Darwin
+#if canImport(Network)
 import Network
-#if DEBUG
-import os
 #endif
 
-/// MDNS encapsulates Bonjour/mDNS advertise and discovery flows for iOS.
-/// Public APIs are thread-safe: they hop to the main thread internally because
-/// NetService/NetServiceBrowser/NWBrowser must be used from a runloop thread (usually main).
-final class MDNS: NSObject {
+/// iOS mDNS manager.
+/// - Publishes via `NetService`.
+/// - Discovers via `NWBrowser` (preferred) or `NetServiceBrowser` as a fallback.
+/// - Resolves each candidate with `NetService` to obtain `port`, `hosts`, and optional TXT.
+/// - Produces a normalized array of dictionaries consumable by the Capacitor bridge.
+public class MDNS: NSObject {
 
-    // MARK: - Debug logging (silent in Release)
+    // MARK: - Advertising
 
-    #if DEBUG
-    @available(iOS 14.0, *)
-    private static let logger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "MDNS",
-        category: "mDNS"
-    )
-    #endif
-
-    /// Debug log helper: evaluates the message before passing to Logger to avoid
-    /// escaping/non-escaping autoclosure issues.
-    @inline(__always)
-    private func dlog(_ message: @autoclosure () -> String) {
-        #if DEBUG
-        let s = message()
-        if #available(iOS 14.0, *) {
-            MDNS.logger.debug("\(s, privacy: .public)")
-        } else {
-            print(s)
-        }
-        #endif
-    }
-
-    // MARK: - Threading helper
-
-    /// Ensure work runs on the main thread.
-    @inline(__always)
-    private func runOnMain(_ block: @escaping () -> Void) {
-        if Thread.isMainThread { block() } else { DispatchQueue.main.async { block() } }
-    }
-
-    // MARK: - Internal state (advertise)
-
-    private var service: NetService?
-    /// Completion for publish; delivers final registered name (may be uniquified).
+    private var publisher: NetService?
     private var publishCompletion: ((Result<String, Error>) -> Void)?
 
-    // MARK: - Internal state (discover)
+    // MARK: - Discovery state
 
-    private var browser: NetServiceBrowser?
-    private var nwBrowser: NWBrowser?
-    private var found: [String: NetService] = [:]   // name -> NetService to resolve
-    private var resolveRemaining = 0                // number of in-flight resolves
-    private var discoveryCompletion: (([[String: Any]]) -> Void)?
-    private var targetId: String?
+    private var nsBrowser: NetServiceBrowser?
+    #if canImport(Network)
+    private var nwBrowser: Any? // keep as `Any` to allow building against older SDKs
+    #endif
 
-    // Debounce/timeout machinery
-    private var hardTimeoutWorkItem: DispatchWorkItem?
-    private var settleWorkItem: DispatchWorkItem?
+    /// Map the resolving `NetService` → service box (accumulates details while resolving).
+    private var resolveMap: [NetService: ServiceBox] = [:]
+    /// Discovered items (kept for dedup / output).
+    private var discovered: [ServiceBox] = []
 
-    // MARK: - Timer helpers
+    /// Optional instance-name filter (exact or prefix, both normalized).
+    private var targetName: String?
 
-    /// Cancel any scheduled timers.
-    private func cancelTimers() {
-        hardTimeoutWorkItem?.cancel(); hardTimeoutWorkItem = nil
-        settleWorkItem?.cancel(); settleWorkItem = nil
-    }
+    /// Completion invoked once with either success(array) or failure(error).
+    private var discoverCompletion: ((Result<[[String: Any]], Error>) -> Void)?
 
-    /// Centralized finalize: stop browsers, cancel timers, deliver results (always on main).
-    private func finish(filterName: String?) {
-        guard let done = discoveryCompletion else { return }
-        discoveryCompletion = nil
-        targetId = nil
-        cancelTimers()
-        nwBrowser?.cancel(); nwBrowser = nil
-        browser?.stop(); browser = nil
-        let list = collectResults(filterName: filterName)
-        done(list)
-    }
-
-    /// Schedule a hard timeout which always finishes discovery with whatever has been collected.
-    private func scheduleHardTimeout(_ ms: Int, filterName: String?) {
-        let wi = DispatchWorkItem { [weak self] in self?.finish(filterName: filterName) }
-        hardTimeoutWorkItem = wi
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms), execute: wi)
-    }
-
-    /// Debounce/settle: finish only if nothing else is resolving and no new results arrived recently.
-    private func scheduleSettle(_ ms: Int = 400, filterName: String?) {
-        settleWorkItem?.cancel()
-        let wi = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
-            if self.resolveRemaining == 0 {
-                self.finish(filterName: filterName)
-            }
-            // If still resolving, do nothing; hard timeout will eventually fire.
-        }
-        settleWorkItem = wi
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms), execute: wi)
-    }
+    /// Timers: hard timeout and short settle debounce.
+    private var hardTimeout: DispatchWorkItem?
+    private var settleDebounce: DispatchWorkItem?
 
     // MARK: - Public API (thread-safe)
 
-    /// Publish a Bonjour service.
+    /// Start advertising one Bonjour/mDNS service.
     /// - Parameters:
-    ///   - type: e.g. "_http._tcp." (must end with ".")
-    ///   - name: Instance name (system may uniquify by appending " (n)")
-    ///   - domain: Usually "local."
-    ///   - port: TCP port (> 0)
-    ///   - txt: Optional TXT map (UTF-8)
-    ///   - onPublished: Optional callback with the final (possibly uniquified) instance name or an error.
-    func broadcast(
+    ///   - type: Full service type with trailing dot, e.g. `_http._tcp.`
+    ///   - name: Instance name (the OS may uniquify it by appending `" (n)"`).
+    ///   - port: TCP port (> 0).
+    ///   - txt: Optional TXT dictionary (string → string).
+    ///   - completion: Called with the final (possibly uniquified) `name`, or an error.
+    public func broadcast(
         type: String,
         name: String,
-        domain: String,
         port: Int,
         txt: [String: String]?,
-        onPublished: ((Result<String, Error>) -> Void)? = nil
+        completion: @escaping (Result<String, Error>) -> Void
     ) {
         runOnMain { [weak self] in
             guard let self = self else { return }
-            self.stopBroadcast()                 // keep a single active service
-            self.publishCompletion = onPublished // store completion for delegate callback
+            self.stopPublisherIfNeeded()
+            self.publishCompletion = completion
 
-            let svc = NetService(domain: domain, type: type, name: name, port: Int32(port))
+            let svc = NetService(domain: "local.", type: type, name: name, port: Int32(port))
             svc.includesPeerToPeer = true
+
             if let txt = txt {
-                let dict = txt.reduce(into: [String: Data]()) { $0[$1.key] = $1.value.data(using: .utf8) }
-                svc.setTXTRecord(NetService.data(fromTXTRecord: dict))
+                let kv: [String: Data] = txt.reduce(into: [:]) { acc, e in
+                    acc[e.key] = e.value.data(using: .utf8) ?? Data()
+                }
+                svc.setTXTRecord(NetService.data(fromTXTRecord: kv))
             }
 
             svc.delegate = self
-            self.service = svc
-            svc.publish(options: .listenForConnections)
+            self.publisher = svc
+            // Use default publish options; connection listening not required here.
+            svc.publish()
         }
     }
 
-    /// Stop the currently advertised service, if any.
-    /// If publish hasn't completed yet, consider it cancelled.
-    func stopBroadcast() {
+    /// Stop the currently advertised service (no-op safe).
+    /// Exposed as `throws` by the bridge, but this implementation does not throw.
+    public func stopBroadcast() throws {
         runOnMain { [weak self] in
-            guard let self = self else { return }
-            self.service?.stop()
-            self.service = nil
-            if let cb = self.publishCompletion {
-                self.publishCompletion = nil
-                let err = NSError(
-                    domain: "MDNS",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Publish cancelled"]
-                )
-                cb(.failure(err))
-            }
+            self?.stopPublisherIfNeeded()
         }
     }
 
     /// Discover services of a given type.
-    ///
-    /// The completion is invoked on the main thread with a normalized array:
-    /// `[["name": String, "type": String, "domain": String, "port": Int, "hosts": [String], "txt": [String:String]?], ...]`
-    ///
-    /// Strategy:
-    /// - Start browse (NWBrowser preferred).
-    /// - Resolve each candidate via NetService for port + addresses.
-    /// - Use a "settle" debounce to allow late results; finish when nothing else is resolving.
-    /// - Always enforce a hard timeout to avoid hanging.
-    func discover(
+    /// - Parameters:
+    ///   - type: Full service type with trailing dot, e.g. `_http._tcp.`
+    ///   - name: Optional instance-name filter (exact or prefix; both normalized).
+    ///   - timeoutMs: Hard timeout (milliseconds). Discovery always completes by this time.
+    ///   - useNW: Prefer `NWBrowser` when available (default `true`), fallback to `NetServiceBrowser` otherwise.
+    ///   - completion: Success with normalized service dictionaries, or failure with error.
+    public func discover(
         type: String,
-        id: String?,
+        name: String?,
         timeoutMs: Int,
-        useNW: Bool,
-        completion: @escaping ([[String: Any]]) -> Void
+        useNW: Bool = true,
+        completion: @escaping (Result<[[String: Any]], Error>) -> Void
     ) {
         runOnMain { [weak self] in
             guard let self = self else { return }
-
-            // Reset session
+            // Reset session state.
             self.cancelTimers()
-            self.browser?.stop(); self.browser = nil
-            self.nwBrowser?.cancel(); self.nwBrowser = nil
-            self.found.removeAll()
-            self.resolveRemaining = 0
-            self.targetId = id
+            self.stopBrowsers()
+            self.resolveMap.removeAll()
+            self.discovered.removeAll()
+            self.targetName = name
+            self.discoverCompletion = completion
 
-            // Wrap completion to guarantee main-thread delivery and cleanup.
-            self.discoveryCompletion = { [weak self] services in
-                guard let self = self else { return }
-                self.cancelTimers()
-                self.nwBrowser?.cancel(); self.nwBrowser = nil
-                self.browser?.stop(); self.browser = nil
-                completion(services)
+            // Schedule hard timeout (always resolves/finishes).
+            let ht = DispatchWorkItem { [weak self] in self?.finishDiscovery() }
+            self.hardTimeout = ht
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(max(0, timeoutMs)), execute: ht)
+
+            // Start browsing: NWBrowser preferred when available and requested.
+            #if canImport(Network)
+            if useNW, #available(iOS 12.0, *) {
+                self.startNWBrowse(typeWithDot: type)
+                return
             }
-
-            // Start browsing
-            if useNW {
-                self.startNWBrowse(typeWithDot: type, targetId: id, timeoutMs: timeoutMs)
-            } else {
-                let b = NetServiceBrowser()
-                b.includesPeerToPeer = true
-                b.delegate = self
-                self.browser = b
-                // Empty domain ("") discovers in default domains (typically "local.")
-                b.searchForServices(ofType: type, inDomain: "")
-            }
-
-            // Hard timeout: always finish after timeoutMs with whatever we have.
-            self.scheduleHardTimeout(timeoutMs, filterName: id)
+            #endif
+            // Fallback: NetServiceBrowser
+            let b = NetServiceBrowser()
+            b.includesPeerToPeer = true
+            b.delegate = self
+            self.nsBrowser = b
+            // Empty domain discovers in default domains (typically "local.").
+            b.searchForServices(ofType: type, inDomain: "")
         }
     }
 
-    // MARK: - NWBrowser path
+    // MARK: - Internal: NWBrowser discovery
 
-    /// Start discovery using NWBrowser (Network framework).
-    /// Uses includePeerToPeer for better AWDL/BT discovery behavior.
-    private func startNWBrowse(
-        typeWithDot: String,
-        targetId: String?,
-        timeoutMs: Int
-    ) {
-        // NWBrowser expects type without the trailing dot.
+    #if canImport(Network)
+    @available(iOS 12.0, *)
+    private func startNWBrowse(typeWithDot: String) {
+        // NWBrowser expects type without trailing dot.
         let typeNoDot = typeWithDot.hasSuffix(".") ? String(typeWithDot.dropLast()) : typeWithDot
 
-        // Use generic NWParameters and explicitly enable P2P.
         let params = NWParameters()
         params.includePeerToPeer = true
 
-        let b = NWBrowser(for: .bonjour(type: typeNoDot, domain: nil), using: params)
-        nwBrowser = b
+        let browser = NWBrowser(for: .bonjour(type: typeNoDot, domain: nil), using: params)
+        self.nwBrowser = browser
 
-        b.stateUpdateHandler = { [weak self] state in
-            self?.dlog("[mDNS][NW] state: \(state)")
+        browser.stateUpdateHandler = { state in
+            // Intentionally quiet; errors are reflected via timeout or partial results.
+            // print("[mDNS][NW] state: \(state)")
+            switch state {
+            case .failed(let err):
+                // Do not finish immediately; let the hard timeout deliver partial results.
+                // Optionally, one could trigger a fallback here.
+                // print("[mDNS][NW] failed: \(err)")
+                _ = err // silence unused
+            default:
+                break
+            }
         }
 
-        b.browseResultsChangedHandler = { [weak self] results, _ in
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
             guard let self = self else { return }
             for r in results {
-                guard case let .service(name: name, type: type, domain: domain, interface: _) = r.endpoint else { continue }
+                guard case let NWEndpoint.service(name: n, type: t, domain: d, interface: _) = r.endpoint else { continue }
+                if !self.matchesTarget(n) { continue }
 
-                // Optional filter by instance name (normalized exact OR prefix match).
-                if !self.matchesTarget(candidate: name, target: targetId) { continue }
+                // Use NetService for resolve (port/hosts/TXT) to keep output parity with fallback.
+                let key = self.keyFor(name: n, type: t, domain: d)
+                if self.discovered.contains(where: { $0.identityKey == key }) { continue }
 
-                // Use NetService only to resolve host addresses and port.
-                if self.found[name] == nil {
-                    let svc = NetService(
-                        domain: domain.isEmpty ? "local." : domain,
-                        type: type.hasSuffix(".") ? type : type + ".",
-                        name: name
-                    )
-                    svc.includesPeerToPeer = true
-                    svc.delegate = self
-                    self.found[name] = svc
-                    self.resolveRemaining += 1
-                    svc.resolve(withTimeout: 5.0)
-                    self.dlog("[mDNS][NW] found: \(name) \(type) \(domain)")
+                let resolver = NetService(domain: d.isEmpty ? "local." : d,
+                                          type: t.hasSuffix(".") ? t : t + ".",
+                                          name: n)
+                resolver.includesPeerToPeer = true
+                resolver.delegate = self
 
-                    // Every new discovery reschedules a short settle window.
-                    self.scheduleSettle(400, filterName: targetId)
-                }
+                let box = ServiceBox(name: n, type: resolver.type, domain: resolver.domain)
+                self.discovered.append(box)
+                self.resolveMap[resolver] = box
+                resolver.resolve(withTimeout: 5.0)
+
+                // Reschedule short settle window on each new find.
+                self.scheduleSettleDebounce()
             }
         }
 
-        b.start(queue: .main)
+        browser.start(queue: .main)
     }
+    #endif
 
-    // MARK: - Helpers
+    // MARK: - Internal: finalize & helpers
 
-    /// Build a normalized JSON-like array of services.
-    /// If `filterName` is set, only services with equal or prefix-matching normalized names are returned.
-    private func collectResults(filterName: String?) -> [[String: Any]] {
-        return found.values.compactMap { svc in
-            if !matchesTarget(candidate: svc.name, target: filterName) { return nil }
+    /// Build the final output and complete the discovery promise.
+    private func finishDiscovery() {
+        cancelTimers()
+        stopBrowsers()
 
-            var obj: [String: Any] = [
-                "name": svc.name,
-                "type": svc.type,
-                "domain": svc.domain,
-                "port": svc.port,
+        // Keep only resolved entries, and deduplicate by (name:port:host0).
+        var seen = Set<String>()
+        var out: [[String: Any]] = []
+
+        for box in discovered where box.resolved {
+            let key = "\(box.name):\(box.port):\(box.hosts.first ?? "")"
+            if seen.contains(key) { continue }
+            seen.insert(key)
+
+            var entry: [String: Any] = [
+                "name": box.name,
+                "type": box.type,
+                "domain": box.domain,
+                "port": box.port
             ]
-
-            // TXT
-            if let data = svc.txtRecordData() {
-                let dict = NetService.dictionary(fromTXTRecord: data)
-                obj["txt"] = dict.reduce(into: [String: String]()) { acc, kv in
-                    acc[kv.key] = String(data: kv.value, encoding: .utf8) ?? ""
-                }
-            }
-
-            // Hosts (numeric v4/v6)
-            if let addresses = svc.addresses, !addresses.isEmpty {
-                let hosts = addresses.compactMap { addrData -> String? in
-                    var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    return addrData.withUnsafeBytes {
-                        guard let sa = $0.baseAddress?.assumingMemoryBound(to: sockaddr.self) else { return nil }
-                        let r = getnameinfo(
-                            sa,
-                            socklen_t(sa.pointee.sa_len),
-                            &host,
-                            socklen_t(host.count),
-                            nil,
-                            0,
-                            NI_NUMERICHOST
-                        )
-                        return r == 0 ? String(cString: host) : nil
-                    }
-                }
-                if !hosts.isEmpty { obj["hosts"] = hosts }
-            }
-            return obj
+            if !box.hosts.isEmpty { entry["hosts"] = box.hosts }
+            if !box.txt.isEmpty { entry["txt"] = box.txt }
+            out.append(entry)
         }
+
+        // Clear state before invoking the callback.
+        resolveMap.removeAll()
+        discovered.removeAll()
+        targetName = nil
+
+        let cb = discoverCompletion
+        discoverCompletion = nil
+        cb?(.success(out))
     }
 
-    /// Normalize a service name by removing the system-appended " (n)" suffix.
+    /// Cancel timers (hard timeout and settle debounce).
+    private func cancelTimers() {
+        hardTimeout?.cancel(); hardTimeout = nil
+        settleDebounce?.cancel(); settleDebounce = nil
+    }
+
+    /// Schedule a short debounce to finish discovery when the system becomes idle.
+    private func scheduleSettleDebounce(_ ms: Int = 350) {
+        settleDebounce?.cancel()
+        let wi = DispatchWorkItem { [weak self] in self?.finishDiscovery() }
+        settleDebounce = wi
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms), execute: wi)
+    }
+
+    /// Stop any active browsers.
+    private func stopBrowsers() {
+        #if canImport(Network)
+        if #available(iOS 12.0, *) {
+            (nwBrowser as? NWBrowser)?.cancel()
+            nwBrowser = nil
+        }
+        #endif
+        nsBrowser?.stop()
+        nsBrowser?.delegate = nil
+        nsBrowser = nil
+    }
+
+    /// Stop the current publisher, if any.
+    private func stopPublisherIfNeeded() {
+        publisher?.stop()
+        publisher?.delegate = nil
+        publisher = nil
+        // Do not call `publishCompletion` here: externally, `stopBroadcast()` should be considered a neutral action.
+        publishCompletion = nil
+    }
+
+    /// Normalize a service name by removing the system-appended `" (n)"` suffix.
     private func normalize(_ s: String) -> String {
         return s.replacingOccurrences(of: #" \(\d+\)$"#, with: "", options: .regularExpression)
     }
 
-    /// Return true if `candidate` matches `target` by exact OR prefix match (both normalized).
-    /// When `target` is nil, it accepts all candidates.
-    private func matchesTarget(candidate: String, target: String?) -> Bool {
-        guard let t = target else { return true }
-        let c1 = normalize(candidate)
-        let c2 = normalize(t)
-        return (c1 == c2) || c1.hasPrefix(c2)
+    /// Does `candidate` match `targetName` exactly or by prefix (both normalized)? If no target, accept all.
+    private func matchesTarget(_ candidate: String) -> Bool {
+        guard let t = targetName, !t.isEmpty else { return true }
+        let c = normalize(candidate), tt = normalize(t)
+        return (c == tt) || c.hasPrefix(tt)
+    }
+
+    /// Build a stable identity key for deduplication.
+    private func keyFor(name: String, type: String, domain: String) -> String {
+        return "\(name)|\(type)|\(domain)"
+    }
+
+    /// Ensure execution on main queue (NSNetServices expect main run loop).
+    private func runOnMain(_ block: @escaping () -> Void) {
+        if Thread.isMainThread { block() } else { DispatchQueue.main.async(execute: block) }
     }
 }
 
-// MARK: - NetServiceBrowserDelegate
+// MARK: - NetServiceDelegate (publish + resolve)
+
+extension MDNS: NetServiceDelegate {
+
+    // Publish callbacks
+    public func netServiceDidPublish(_ sender: NetService) {
+        let cb = publishCompletion
+        publishCompletion = nil
+        cb?(.success(sender.name))
+    }
+
+    public func netService(_ sender: NetService, didNotPublish errorDict: [String : NSNumber]) {
+        let cb = publishCompletion
+        publishCompletion = nil
+        let code = (errorDict[NetService.errorCode] as NSNumber?)?.intValue ?? -1
+        let err = NSError(
+            domain: "mDNS.publish",
+            code: code,
+            userInfo: [NSLocalizedDescriptionKey: "Failed to publish service", "info": errorDict]
+        )
+        cb?(.failure(err))
+    }
+
+    // Resolve callbacks
+    public func netServiceDidResolveAddress(_ sender: NetService) {
+        guard let box = resolveMap[sender] else { return }
+        box.port = Int(sender.port)
+        box.hosts = parseHosts(sender.addresses)
+        if let txtData = sender.txtRecordData(),
+           let dict = NetService.dictionary(fromTXTRecord: txtData) as? [String: Data] {
+            box.txt = dict.reduce(into: [:]) { acc, e in
+                acc[e.key] = String(data: e.value, encoding: .utf8) ?? ""
+            }
+        }
+        box.resolved = true
+
+        // Early finish if a specific target is requested and this service matches it.
+        if let t = targetName, !t.isEmpty, matchesTarget(sender.name) {
+            finishDiscovery()
+        } else {
+            // Otherwise, allow a brief settle window to collect late peers.
+            scheduleSettleDebounce()
+        }
+    }
+
+    public func netService(_ sender: NetService, didNotResolve errorDict: [String : NSNumber]) {
+        // Drop the unresolved service and try to continue with others.
+        resolveMap.removeValue(forKey: sender)
+        scheduleSettleDebounce()
+    }
+}
+
+// MARK: - NetServiceBrowserDelegate (fallback browsing)
 
 extension MDNS: NetServiceBrowserDelegate {
-    public func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
-        dlog("[mDNS] found: \(service.name) \(service.type) \(service.domain)")
-        found[service.name] = service
-        service.delegate = self
-        resolveRemaining += 1
-        service.resolve(withTimeout: 5.0)
 
-        // When more are coming, do not finish yet; reschedule settle when wave slows down.
-        if !moreComing { scheduleSettle(350, filterName: targetId) }
+    public func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+        // Early filter by instance name.
+        guard matchesTarget(service.name) else { return }
+
+        // Create a dedicated resolver (do not reuse `service` directly).
+        let resolver = NetService(domain: service.domain, type: service.type, name: service.name)
+        resolver.includesPeerToPeer = true
+        resolver.delegate = self
+
+        // Track box + resolver pair.
+        let box = ServiceBox(name: service.name, type: service.type, domain: service.domain)
+        resolveMap[resolver] = box
+        discovered.append(box)
+
+        resolver.resolve(withTimeout: 5.0)
+
+        // If this wave ends soon, schedule settle debounce; else wait for more.
+        if !moreComing { scheduleSettleDebounce() }
     }
 
     public func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
-        found.removeValue(forKey: service.name)
+        // Not critical for snapshot output; ignore.
     }
 
-    public func netServiceBrowserWillSearch(_ browser: NetServiceBrowser) {
-        dlog("[mDNS] willSearch")
-    }
-
-    public func netServiceBrowserDidStopSearch(_ browser: NetServiceBrowser) {
-        dlog("[mDNS] didStopSearch")
-    }
-
-    public func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
-        dlog("[mDNS] didNotSearch \(errorDict)")
-        // Safely end with whatever we have so far.
-        finish(filterName: targetId)
+    public func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String : NSNumber]) {
+        // Gracefully complete with whatever we have (plugin will surface error=true).
+        finishDiscovery()
     }
 }
 
-// MARK: - NetServiceDelegate
+// MARK: - Model
 
-extension MDNS: NetServiceDelegate {
-    /// Called when the service has been successfully published.
-    /// The service name may already be uniquified (e.g., "My App (2)").
-    public func netServiceDidPublish(_ sender: NetService) {
-        if let cb = publishCompletion {
-            publishCompletion = nil
-            cb(.success(sender.name))
-        }
+/// Mutable container while resolving a service.
+private final class ServiceBox: Hashable {
+    let name: String
+    let type: String
+    let domain: String
+
+    var port: Int = 0
+    var hosts: [String] = []
+    var txt: [String: String] = [:]
+    var resolved: Bool = false
+
+    init(name: String, type: String, domain: String) {
+        self.name = name
+        self.type = type
+        self.domain = domain
     }
 
-    public func netServiceDidResolveAddress(_ sender: NetService) {
-        dlog("[mDNS] resolved: \(sender.name) \(sender.port)")
-        resolveRemaining = max(0, resolveRemaining - 1)
+    var identityKey: String { "\(name)|\(type)|\(domain)" }
 
-        // Early-exit: if a specific target was requested and this is a match, finish now.
-        if matchesTarget(candidate: sender.name, target: targetId), discoveryCompletion != nil {
-            // Use targetId as filter so prefix matches are included as well.
-            finish(filterName: targetId)
-            return
-        }
-
-        // Debounce: if nothing else is resolving, finish soon; otherwise let hard timeout fire.
-        scheduleSettle(300, filterName: targetId)
+    static func == (lhs: ServiceBox, rhs: ServiceBox) -> Bool {
+        lhs.identityKey == rhs.identityKey
     }
+    func hash(into hasher: inout Hasher) { hasher.combine(identityKey) }
+}
 
-    public func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
-        dlog("[mDNS] resolveFailed \(sender.name) \(errorDict)")
-        resolveRemaining = max(0, resolveRemaining - 1)
+// MARK: - Address utilities
 
-        // Early-exit if the requested target failed to resolve—still deliver what we have so far.
-        if matchesTarget(candidate: sender.name, target: targetId), discoveryCompletion != nil {
-            finish(filterName: targetId)
-            return
-        }
+/// Convert `NetService.addresses` to numeric IPv4/IPv6 strings.
+private func parseHosts(_ addrs: [Data]?) -> [String] {
+    guard let addrs = addrs, !addrs.isEmpty else { return [] }
+    var out: [String] = []
+    out.reserveCapacity(addrs.count)
 
-        scheduleSettle(300, filterName: targetId)
-    }
+    for data in addrs {
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            let sa = base.assumingMemoryBound(to: sockaddr.self)
+            let family = Int32(sa.pointee.sa_family)
 
-    /// Called when the service failed to publish. We translate the error dictionary into NSError.
-    public func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
-        if let cb = publishCompletion {
-            publishCompletion = nil
-            let code = (errorDict[NetService.errorCode] as NSNumber?)?.intValue ?? -1
-            let err = NSError(
-                domain: "NSNetServicesErrorDomain",
-                code: code,
-                userInfo: [
-                    NSLocalizedDescriptionKey: "Failed to publish mDNS service",
-                    "info": errorDict
-                ]
-            )
-            cb(.failure(err))
+            if family == AF_INET {
+                var addr = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+                var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                if inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
+                    out.append(String(cString: buf))
+                }
+            } else if family == AF_INET6 {
+                var addr6 = sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee.sin6_addr }
+                var buf6 = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                if inet_ntop(AF_INET6, &addr6, &buf6, socklen_t(INET6_ADDRSTRLEN)) != nil {
+                    out.append(String(cString: buf6))
+                }
+            }
         }
     }
+    return out
 }

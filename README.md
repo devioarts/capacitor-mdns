@@ -91,7 +91,7 @@ Public API surface of the Capacitor mDNS plugin.
 ### startBroadcast(...)
 
 ```typescript
-startBroadcast(options: MdnsBroadcastOptions) => Promise<{ name: string; publishing: boolean; }>
+startBroadcast(options: MdnsBroadcastOptions) => Promise<MdnsBroadcastResult>
 ```
 
 Start advertising a Bonjour/mDNS service.
@@ -100,7 +100,7 @@ Start advertising a Bonjour/mDNS service.
 | ------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | **`options`** | <code><a href="#mdnsbroadcastoptions">MdnsBroadcastOptions</a></code> | - {@link <a href="#mdnsbroadcastoptions">MdnsBroadcastOptions</a>} |
 
-**Returns:** <code>Promise&lt;{ name: string; publishing: boolean; }&gt;</code>
+**Returns:** <code>Promise&lt;<a href="#mdnsbroadcastresult">MdnsBroadcastResult</a>&gt;</code>
 
 --------------------
 
@@ -108,12 +108,12 @@ Start advertising a Bonjour/mDNS service.
 ### stopBroadcast()
 
 ```typescript
-stopBroadcast() => Promise<{ publishing: boolean; }>
+stopBroadcast() => Promise<MdnsStopResult>
 ```
 
 Stop advertising the currently registered service (no-op if none).
 
-**Returns:** <code>Promise&lt;{ publishing: boolean; }&gt;</code>
+**Returns:** <code>Promise&lt;<a href="#mdnsstopresult">MdnsStopResult</a>&gt;</code>
 
 --------------------
 
@@ -121,7 +121,7 @@ Stop advertising the currently registered service (no-op if none).
 ### discover(...)
 
 ```typescript
-discover(options?: MdnsDiscoverOptions | undefined) => Promise<{ services: MdnsService[]; }>
+discover(options?: MdnsDiscoverOptions | undefined) => Promise<MdnsDiscoverResult>
 ```
 
 Discover services of a given type and optionally filter by instance name.
@@ -130,7 +130,7 @@ Discover services of a given type and optionally filter by instance name.
 | ------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------- |
 | **`options`** | <code><a href="#mdnsdiscoveroptions">MdnsDiscoverOptions</a></code> | - {@link <a href="#mdnsdiscoveroptions">MdnsDiscoverOptions</a>} |
 
-**Returns:** <code>Promise&lt;{ services: MdnsService[]; }&gt;</code>
+**Returns:** <code>Promise&lt;<a href="#mdnsdiscoverresult">MdnsDiscoverResult</a>&gt;</code>
 
 --------------------
 
@@ -138,17 +138,54 @@ Discover services of a given type and optionally filter by instance name.
 ### Interfaces
 
 
+#### MdnsBroadcastResult
+
+Result of startBroadcast(). Indicates whether advertising is active
+and the final service name. On failure, `error` is true and `errorMessage`
+describes the issue.
+
+| Prop               | Type                        | Description                                                          |
+| ------------------ | --------------------------- | -------------------------------------------------------------------- |
+| **`error`**        | <code>boolean</code>        | True if the operation failed.                                        |
+| **`errorMessage`** | <code>string \| null</code> | Error description or null on success.                                |
+| **`name`**         | <code>string</code>         | Final (possibly uniquified) service instance name. Empty on failure. |
+| **`publishing`**   | <code>boolean</code>        | Whether the advertiser is currently active.                          |
+
+
 #### MdnsBroadcastOptions
 
 Options for starting a Bonjour/mDNS advertisement.
 
-| Prop         | Type                                        | Description                                   |
-| ------------ | ------------------------------------------- | --------------------------------------------- |
-| **`type`**   | <code>string</code>                         | Service type (including the trailing dot).    |
-| **`id`**     | <code>string</code>                         | Service instance name.                        |
-| **`domain`** | <code>string</code>                         | Bonjour domain.                               |
-| **`port`**   | <code>number</code>                         | TCP port to advertise.                        |
-| **`txt`**    | <code><a href="#mdnstxt">MdnsTxt</a></code> | Optional TXT key–value pairs (UTF-8 strings). |
+| Prop       | Type                                        | Description                                   |
+| ---------- | ------------------------------------------- | --------------------------------------------- |
+| **`type`** | <code>string</code>                         | Service type (including the trailing dot).    |
+| **`name`** | <code>string</code>                         | Service instance name.                        |
+| **`port`** | <code>number</code>                         | TCP port to advertise.                        |
+| **`txt`**  | <code><a href="#mdnstxt">MdnsTxt</a></code> | Optional TXT key–value pairs (UTF-8 strings). |
+
+
+#### MdnsStopResult
+
+Result of stopBroadcast(). Indicates whether the advertiser is active
+after the call (normally false) and includes error information.
+
+| Prop               | Type                        | Description                                                         |
+| ------------------ | --------------------------- | ------------------------------------------------------------------- |
+| **`error`**        | <code>boolean</code>        | True if an error occurred while stopping.                           |
+| **`errorMessage`** | <code>string \| null</code> | Error description or null on success.                               |
+| **`publishing`**   | <code>boolean</code>        | Whether the advertiser remains active (should be false on success). |
+
+
+#### MdnsDiscoverResult
+
+Result of discover(). Contains normalized services and error information.
+
+| Prop                | Type                        | Description                                                                    |
+| ------------------- | --------------------------- | ------------------------------------------------------------------------------ |
+| **`error`**         | <code>boolean</code>        | True if discovery encountered an error (partial results may still be present). |
+| **`errorMessage`**  | <code>string \| null</code> | Error description or null when no error occurred.                              |
+| **`servicesFound`** | <code>number</code>         | Convenience count equal to services.length.                                    |
+| **`services`**      | <code>MdnsService[]</code>  | Normalized list of discovered services.                                        |
 
 
 #### MdnsService
@@ -162,7 +199,7 @@ Returned from {@link mDNSPlugin.discover}.
 | **`type`**   | <code>string</code>                         | Full service type including the trailing dot, e.g. `"_http._tcp."`.                       |
 | **`domain`** | <code>string</code>                         | Service domain; typically `"local."`.                                                     |
 | **`port`**   | <code>number</code>                         | TCP port the service advertises.                                                          |
-| **`hosts`**  | <code>string[]</code>                       | Resolved numeric IP addresses (IPv4/IPv6). Empty when resolution fails.                   |
+| **`hosts`**  | <code>string[]</code>                       | Resolved numeric IP addresses (IPv4/IPv6).                                                |
 | **`txt`**    | <code><a href="#mdnstxt">MdnsTxt</a></code> | TXT dictionary (key → value). Usually present on iOS; Android NSD does not populate this. |
 
 
@@ -170,12 +207,12 @@ Returned from {@link mDNSPlugin.discover}.
 
 Options for Bonjour/mDNS discovery.
 
-| Prop            | Type                 | Description                                                      |
-| --------------- | -------------------- | ---------------------------------------------------------------- |
-| **`type`**      | <code>string</code>  | Service type (including the trailing dot).                       |
-| **`id`**        | <code>string</code>  | Optional instance name filter (prefix-safe).                     |
-| **`timeoutMs`** | <code>number</code>  | Discovery timeout in milliseconds.                               |
-| **`useNW`**     | <code>boolean</code> | iOS-only hint to use `NWBrowser` instead of `NetServiceBrowser`. |
+| Prop          | Type                 | Description                                                      |
+| ------------- | -------------------- | ---------------------------------------------------------------- |
+| **`type`**    | <code>string</code>  | Service type (including the trailing dot).                       |
+| **`name`**    | <code>string</code>  | Optional instance name filter (prefix-safe).                     |
+| **`timeout`** | <code>number</code>  | Discovery timeout in milliseconds.                               |
+| **`useNW`**   | <code>boolean</code> | iOS-only hint to use `NWBrowser` instead of `NetServiceBrowser`. |
 
 
 ### Type Aliases
