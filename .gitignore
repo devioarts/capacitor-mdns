@@ -9,6 +9,7 @@ Package.resolved
 Build
 xcuserdata
 /.build
+/.swiftlint-cache
 /Packages
 xcuserdata/
 DerivedData/

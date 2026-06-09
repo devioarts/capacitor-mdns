@@ -4,9 +4,11 @@ package com.devioarts.capacitor.mdns
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import kotlinx.coroutines.*
+import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -33,7 +35,7 @@ class mDNS(
     data class MdnsService(
         val name: String,
         val type: String,
-        val host: String?, // numeric address (v4/v6) or null if resolve fails
+        val hosts: List<String>, // numeric addresses (v4/v6)
         val port: Int
     )
 
@@ -50,6 +52,7 @@ class mDNS(
 
     /** Main looper utilities for non-suspending entry points. */
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainExecutor = Executor { command -> mainHandler.post(command) }
     private inline fun runOnMain(crossinline block: () -> Unit) {
         if (Looper.myLooper() === Looper.getMainLooper()) block() else mainHandler.post { block() }
     }
@@ -130,6 +133,7 @@ class mDNS(
         // Prepare state
         discListenerRef.getAndSet(null)?.let { safeStopDiscovery(it) }
         val found = mutableListOf<MdnsService>()
+        val serviceInfoCallbacks = mutableListOf<NsdManager.ServiceInfoCallback>()
         val result = CompletableDeferred<List<MdnsService>>()
 
         // Normalization for "(n)" suffix appended by the OS.
@@ -139,12 +143,70 @@ class mDNS(
             val t = normalize(targetName ?: return true) // if no target, accept all
             return (c == t) || c.startsWith(t)
         }
+        fun upsert(item: MdnsService) {
+            val index = found.indexOfFirst { it.name == item.name && it.type == item.type && it.port == item.port }
+            if (index >= 0) found[index] = item else found.add(item)
+        }
+        fun unregisterServiceInfoCallbacks() {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+            serviceInfoCallbacks.toList().forEach { safeUnregisterServiceInfoCallback(it) }
+            serviceInfoCallbacks.clear()
+        }
+        fun completeWithCurrentResults(discoveryListener: NsdManager.DiscoveryListener) {
+            unregisterServiceInfoCallbacks()
+            safeStopDiscovery(discoveryListener)
+            if (!result.isCompleted) result.complete(found.toList())
+        }
+
+        @Suppress("DEPRECATION")
+        fun resolveLegacy(si: NsdServiceInfo, discoveryListener: NsdManager.DiscoveryListener) {
+            nsd.resolveService(si, object : NsdManager.ResolveListener {
+                override fun onResolveFailed(s: NsdServiceInfo, errorCode: Int) { /* ignore */ }
+
+                override fun onServiceResolved(s: NsdServiceInfo) {
+                    upsert(toMdnsService(s))
+
+                    // Early-exit for exact/prefix target match.
+                    if (targetName != null && matchesTarget(s.serviceName)) {
+                        completeWithCurrentResults(discoveryListener)
+                    }
+                }
+            })
+        }
+
+        fun registerServiceInfoCallback(si: NsdServiceInfo, discoveryListener: NsdManager.DiscoveryListener) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                resolveLegacy(si, discoveryListener)
+                return
+            }
+
+            val callback = object : NsdManager.ServiceInfoCallback {
+                override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) { /* ignore */ }
+                override fun onServiceInfoCallbackUnregistered() { /* no-op */ }
+                override fun onServiceLost() { /* no-op */ }
+
+                override fun onServiceUpdated(serviceInfo: NsdServiceInfo) {
+                    upsert(toMdnsService(serviceInfo))
+
+                    // Early-exit for exact/prefix target match.
+                    if (targetName != null && matchesTarget(serviceInfo.serviceName)) {
+                        completeWithCurrentResults(discoveryListener)
+                    }
+                }
+            }
+
+            serviceInfoCallbacks.add(callback)
+            try {
+                nsd.registerServiceInfoCallback(si, mainExecutor, callback)
+            } catch (_: Throwable) {
+                serviceInfoCallbacks.remove(callback)
+            }
+        }
 
         val listener = object : NsdManager.DiscoveryListener {
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
                 // Fail fast: stop discovery and complete with whatever we have (likely empty).
-                safeStopDiscovery(this)
-                if (!result.isCompleted) result.complete(found.toList())
+                completeWithCurrentResults(this)
             }
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) { /* no-op */ }
             override fun onDiscoveryStarted(serviceType: String) { /* no-op */ }
@@ -154,25 +216,7 @@ class mDNS(
                 if (targetName != null && !matchesTarget(si.serviceName)) return
 
                 val discoveryListener = this
-                nsd.resolveService(si, object : NsdManager.ResolveListener {
-                    override fun onResolveFailed(s: NsdServiceInfo, errorCode: Int) { /* ignore */ }
-
-                    override fun onServiceResolved(s: NsdServiceInfo) {
-                        val item = MdnsService(
-                            name = s.serviceName,
-                            type = s.serviceType,
-                            host = s.host?.hostAddress,
-                            port = s.port
-                        )
-                        found.add(item)
-
-                        // Early-exit for exact/prefix target match.
-                        if (targetName != null && matchesTarget(s.serviceName)) {
-                            safeStopDiscovery(discoveryListener)
-                            if (!result.isCompleted) result.complete(found.toList())
-                        }
-                    }
-                })
+                registerServiceInfoCallback(si, discoveryListener)
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) { /* no-op */ }
@@ -184,8 +228,7 @@ class mDNS(
 
         val timeoutJob = scope.launch {
             delay(timeoutMs.toLong())
-            safeStopDiscovery(listener)
-            if (!result.isCompleted) result.complete(found.toList())
+            completeWithCurrentResults(listener)
         }
 
         try {
@@ -193,6 +236,7 @@ class mDNS(
         } finally {
             // Cleanup in all cases (early-exit or timeout)
             timeoutJob.cancel()
+            unregisterServiceInfoCallbacks()
             discListenerRef.getAndSet(null)?.let { safeStopDiscovery(it) }
         }
     }
@@ -218,4 +262,29 @@ class mDNS(
     private fun safeStopDiscovery(l: NsdManager.DiscoveryListener) {
         try { nsd.stopServiceDiscovery(l) } catch (_: Throwable) {}
     }
+
+    /** Best-effort stop service info updates; NSD may throw if not registered. */
+    private fun safeUnregisterServiceInfoCallback(l: NsdManager.ServiceInfoCallback) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try { nsd.unregisterServiceInfoCallback(l) } catch (_: Throwable) {}
+        }
+    }
+
+    private fun toMdnsService(s: NsdServiceInfo): MdnsService =
+        MdnsService(
+            name = s.serviceName,
+            type = s.serviceType,
+            hosts = hostAddresses(s),
+            port = s.port
+        )
+
+    private fun hostAddresses(s: NsdServiceInfo): List<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            s.hostAddresses.mapNotNull { it.hostAddress }
+        } else {
+            legacyHostAddress(s)?.let { listOf(it) } ?: emptyList()
+        }
+
+    @Suppress("DEPRECATION")
+    private fun legacyHostAddress(s: NsdServiceInfo): String? = s.host?.hostAddress
 }

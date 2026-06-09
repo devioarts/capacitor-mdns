@@ -3,7 +3,6 @@
 //   const { createMDNSAPI } = require('.../electron/mdns-bridge.cjs')
 //   contextBridge.exposeInMainWorld('mDNS', createMDNSAPI({ ipcRenderer }))
 //   contextBridge.exposeInMainWorld('mdns', createMDNSAPI({ ipcRenderer })) // alias
-// eslint-disable-next-line no-undef
 module.exports.createMDNSAPI = ({ ipcRenderer }) => {
   return {
     /**

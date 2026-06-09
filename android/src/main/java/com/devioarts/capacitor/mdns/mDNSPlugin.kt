@@ -26,7 +26,7 @@ import org.json.JSONObject
  * - discover       -> {
  *       error: boolean, errorMessage: string|null,
  *       servicesFound: number,
- *       services: Array<{ name, type, domain: "local.", port, hosts?: string[] }>
+ *       services: Array<{ name, type, domain: "local.", port, hosts: string[] }>
  *   }
  */
 @CapacitorPlugin(name = "mDNS")
@@ -139,10 +139,8 @@ class mDNSPlugin : Plugin() {
                         put("name", s.name)
                         put("type", s.type)         // Android returns full type with dot
                         put("domain", "local.")     // NSD is mDNS only
-                        // normalize hosts to [] or [addr]
                         val hosts = JSONArray()
-                        val addr = s.host
-                        if (!addr.isNullOrEmpty()) hosts.put(addr)
+                        s.hosts.forEach { hosts.put(it) }
                         put("hosts", hosts)
                         put("port", s.port)
                         // TXT not available via NSD -> omitted on Android
