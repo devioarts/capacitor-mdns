@@ -129,6 +129,9 @@ export class mDNS {
    * @param options See MdnsBroadcastOptions for type/name/port/txt.
    * @returns Result indicating whether publishing is active and the final name.
    */
+  // BUG [significant]: No timeout on `startBroadcast`. If the 'up' event never fires
+  // and no 'error' event fires either (e.g. bonjour-service silently fails to bind),
+  // the returned Promise will hang indefinitely, leaving the JS caller blocked.
   async startBroadcast(options: MdnsBroadcastOptions): Promise<MdnsBroadcastResult> {
     const { type, protocol } = this.parseType(options.type);
     return new Promise<MdnsBroadcastResult>((resolve) => {

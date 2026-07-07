@@ -35,7 +35,9 @@ export class mDNSWeb extends WebPlugin implements mDNSPlugin {
     const api = this.electronApi;
     if (api?.startBroadcast) return api.startBroadcast(options);
     console.log('[WEB_NOT_SUPPORTED] startBroadcast', options);
-    // Keep the shape consistent even when not supported
+    // BUG [significant]: Returns `publishing: true` even though nothing is being published.
+    // The caller has no way to distinguish a successful Electron IPC call from this no-op stub.
+    // Should return `{ publishing: false, error: true, errorMessage: 'Not supported in browser' }`.
     return { publishing: true, name: '', error: false, errorMessage: null };
   }
 

@@ -20,7 +20,10 @@ module.exports.createMDNSAPI = ({ ipcRenderer }) => {
 
     /**
      * Discover services of a given type, optional normalized exact/prefix name filter.
-     * @param {{type?: string, id?: string, timeoutMs?: number}} [options]
+     * BUG [critical]: JSDoc documents `id` and `timeoutMs` but the actual TypeScript
+     * implementation (mdns.ts) reads `options.name` and `options.timeout`.
+     * Passing `id`/`timeoutMs` here will be silently ignored; use `name`/`timeout` instead.
+     * @param {{type?: string, name?: string, timeout?: number}} [options]
      * @returns {Promise<{services: Array<{name:string,type:string,domain:string,port:number,hosts?:string[],txt?:Record<string,string>}>}>}
      */
     discover: (options) => ipcRenderer.invoke('mdns:discover', options),

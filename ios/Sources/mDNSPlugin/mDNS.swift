@@ -59,7 +59,9 @@ public class MDNS: NSObject {
             self.stopPublisherIfNeeded()
             self.publishCompletion = completion
 
-            let svc = NetService(domain: "local.", type: type, name: name, port: Int32(port))
+            // NOTE [minor]: Port is cast to Int32 but not validated against the upper bound 65535.
+        // A Swift Int can exceed Int32.max; the bridge validates > 0 but not <= 65535.
+        let svc = NetService(domain: "local.", type: type, name: name, port: Int32(port))
             svc.includesPeerToPeer = true
 
             if let txt = txt {
@@ -78,6 +80,9 @@ public class MDNS: NSObject {
 
     /// Stop the currently advertised service (no-op safe).
     /// Exposed as `throws` by the bridge, but this implementation does not throw.
+    // NOTE [minor]: Declared `throws` but the implementation never throws.
+    // The bridge wraps calls in try/catch that will never catch anything here.
+    // Consider removing `throws` in a future refactor.
     public func stopBroadcast() throws {
         runOnMain { [weak self] in
             self?.stopPublisherIfNeeded()
@@ -263,7 +268,9 @@ public class MDNS: NSObject {
         publisher?.stop()
         publisher?.delegate = nil
         publisher = nil
-        // Do not call `publishCompletion` here: externally, `stopBroadcast()` should be considered a neutral action.
+        // BUG [significant]: If `startBroadcast` is called while a previous broadcast is still
+        // in-flight (completion not yet fired), dropping `publishCompletion` here silently abandons
+        // the pending JS promise — the first caller will never receive a response.
         publishCompletion = nil
     }
 
@@ -349,6 +356,11 @@ extension MDNS: NetServiceBrowserDelegate {
     public func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
         // Early filter by instance name.
         guard matchesTarget(service.name) else { return }
+
+        // BUG [significant]: No deduplication check here, unlike the NWBrowser path which
+        // guards with `discovered.contains(where: { $0.identityKey == key })`.
+        // If the delegate fires twice for the same service, duplicate entries are added.
+        // Fix: add `let key = keyFor(...); if discovered.contains(where: ...) { return }` here.
 
         // Create a dedicated resolver (do not reuse `service` directly).
         let resolver = NetService(domain: service.domain, type: service.type, name: service.name)
