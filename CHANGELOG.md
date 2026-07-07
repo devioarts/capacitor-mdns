@@ -1,8 +1,6 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
-
-## [0.1.0] - 2026-07-07
+## [0.1.0]
 
 Compared with `v0.0.3`.
 
@@ -39,10 +37,3 @@ Compared with `v0.0.3`.
 - Fixed iOS discovery failures to return an error result instead of silently completing as a clean empty search.
 - Fixed TXT record normalization on iOS and Electron so discovered values are returned as strings.
 - Fixed Electron broadcast stop/destroy handling to avoid orphaned Bonjour advertisers.
-
-### Notes
-
-- The web fallback behavior is intentionally stricter: unsupported `startBroadcast()` and `discover()` now resolve with `error: true`.
-- Electron applications using `devioarts/capacitor-electron` should import plugin metadata from `@devioarts/capacitor-mdns/electron/settings`.
-
-[0.1.0]: https://github.com/devioarts/capacitor-mdns/compare/v0.0.3...v0.1.0
