@@ -2,7 +2,4 @@ example-app
 dist
 node_modules
 .tmp
-playground/android
-playground/ios
-playground/dist
-playground/release
+playground
