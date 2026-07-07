@@ -52,6 +52,14 @@ class mDNSPlugin : Plugin() {
 
     private fun jnull(msg: String?): Any = msg ?: JSONObject.NULL
 
+    private fun normalizeType(raw: String?): String {
+        val type = raw?.trim()?.takeIf { it.isNotEmpty() } ?: "_http._tcp."
+        return if (type.endsWith(".")) type else "$type."
+    }
+
+    private fun normalizeName(raw: String?): String =
+        raw?.trim()?.takeIf { it.isNotEmpty() } ?: (context?.packageName ?: "DevIOArtsMDNS")
+
     private fun jsResultBroadcast(publishing: Boolean, name: String, error: Boolean, msg: String?): JSObject =
         JSObject().put("publishing", publishing)
             .put("name", name)
@@ -72,6 +80,11 @@ class mDNSPlugin : Plugin() {
 
     // ----------------------- API -----------------------
 
+    @PluginMethod
+    fun getPluginPlatform(call: PluginCall) {
+        call.resolve(JSObject().put("platform", "android"))
+    }
+
     /**
      * Start advertising a Bonjour/mDNS service.
      * - type: default "_http._tcp."
@@ -80,11 +93,11 @@ class mDNSPlugin : Plugin() {
      */
     @PluginMethod
     fun startBroadcast(call: PluginCall) {
-        val type = call.getString("type") ?: "_http._tcp."
-        val name = call.getString("name") ?: (context?.packageName ?: "DevIOArtsMDNS")
+        val type = normalizeType(call.getString("type"))
+        val name = normalizeName(call.getString("name"))
         val port = call.getInt("port") ?: 0
 
-        if (port <= 0) {
+        if (port !in 1..65535) {
             call.resolve(jsResultBroadcast(false, "", true, "Missing/invalid port"))
             return
         }
@@ -127,8 +140,8 @@ class mDNSPlugin : Plugin() {
      */
     @PluginMethod
     fun discover(call: PluginCall) {
-        val type = call.getString("type") ?: "_http._tcp."
-        val targetName = call.getString("name")
+        val type = normalizeType(call.getString("type"))
+        val targetName = call.getString("name")?.trim()?.takeIf { it.isNotEmpty() }
         val timeout = call.getInt("timeout") ?: 3000
 
         scope.launch {

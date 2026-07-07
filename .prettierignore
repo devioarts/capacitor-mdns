@@ -1,1 +1,5 @@
 example-app
+dist
+node_modules
+.tmp
+playground

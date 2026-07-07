@@ -4,6 +4,7 @@ import type {
   MdnsBroadcastResult,
   MdnsDiscoverOptions,
   MdnsDiscoverResult,
+  MdnsPluginPlatformResult,
   MdnsStopResult,
 } from '../src/definitions'; // Types only; no runtime import
 
@@ -14,6 +15,7 @@ declare global {
      * Primary name with the same casing as iOS jsName.
      */
     mDNS: {
+      getPluginPlatform(): Promise<MdnsPluginPlatformResult>;
       startBroadcast(options: MdnsBroadcastOptions): Promise<MdnsBroadcastResult>;
       stopBroadcast(): Promise<MdnsStopResult>;
       discover(options?: MdnsDiscoverOptions): Promise<MdnsDiscoverResult>;

@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "declaration": false,
+    "esModuleInterop": true,
+    "lib": ["es2022", "dom"],
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "noEmitOnError": true,
+    "outDir": ".tmp/e2e-build",
+    "rootDir": ".",
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "es2022",
+    "types": ["node"]
+  },
+  "include": ["electron/mdns.ts", "src/definitions.ts"]
+}

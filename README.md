@@ -1,9 +1,11 @@
 # @devioarts/capacitor-mdns
 
-mDNS plugin for Capacitor that supports Bonjour/mDNS advertisements and discovery.
+mDNS plugin for Capacitor that supports Bonjour/mDNS advertisements and discovery on iOS,
+Android, Electron, and a safe web fallback.
 
-#### Supported platforms: &#x2713; iOS &#x2713; Android &#x2713; Electron
-#### Demo (sources): [application](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-mdns) or directly [file](https://github.com/devioarts/capacitor-examples/blob/main/capacitor-mdns/src/Playground.tsx)
+#### Supported platforms: &#x2713; iOS &#x2713; Android &#x2713; Electron &#x2713; Web fallback
+
+The in-repository [`playground`](./playground) is the example app used during development.
 
 ## Install
 
@@ -12,82 +14,37 @@ npm install @devioarts/capacitor-mdns
 npx cap sync
 ```
 
-## Android
-#### /android/app/src/main/AndroidManifest.xml
-```xml
-<uses-permission android:name="android.permission.INTERNET" />
+## Usage
+
+```ts
+import { mDNS } from '@devioarts/capacitor-mdns';
+
+const runtime = await mDNS.getPluginPlatform();
+
+await mDNS.startBroadcast({ type: '_http._tcp.', name: 'MyService', port: 9100 });
+const result = await mDNS.discover({ type: '_http._tcp.', timeout: 3000 });
+await mDNS.stopBroadcast();
 ```
 
-## iOS
-#### /ios/App/App/Info.plist
-```xml
-<key>NSLocalNetworkUsageDescription</key>
-<string>It is needed for the correct functioning of the application</string>
-<key>NSAppTransportSecurity</key>
-<dict>
-    <key>NSAllowsLocalNetworking</key>
-    <true/>
-</dict>
-<key>NSBonjourServices</key>
-<array>
-    <string>_http._tcp</string>
-</array>
-```
+## Platform Setup
 
----
-## ElectronJS
+Android requires mDNS/network permissions in `AndroidManifest.xml`; the plugin also declares them
+so they are merged during sync. iOS requires local network keys in `Info.plist`.
+Electron support is intended for [`devioarts/capacitor-electron`](https://github.com/devioarts/capacitor-electron)
+and uses metadata exported from `@devioarts/capacitor-mdns/electron/settings`.
 
-```shell
-npm i bonjour-service@1.3.0
-```
+Detailed setup lives in:
 
-> Implementation example was developed on [capacitor-electron](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-electron)
-> base, if you run electron differently, you may need to adjust the code.
+- [iOS and Android setup](./docs/platform-setup.md)
+- [Electron setup](./docs/electron.md)
+- [Playground](./docs/playground.md)
+- [Runtime behavior](./docs/runtime-behavior.md)
 
-#### /electron/main.ts
-
-```typescript
-// ...
-import { mDNS } from '@devioarts/capacitor-mdns/electron/mdns'
-// ...
-const mdns = new mDNS();
-// ...
-app.whenReady().then(() => {
-	//...
-	mdns.init();
-	//...
-});
-/* Or you can use app.on:ready (whenReady is recomended)
-app.on('ready', () => {
-	// ...
-	mdns.init();
-	// ...
-});
-*/
-
-app.on('before-quit', async () => {
-	// ...
-	mdns.destroy();
-	// ...
-})
-//...
-```
-### electron/preload.cjs
-```javascript
-//...
-// THIS IS IMPORTANT FOR PLUGIN!
-const {createMDNSAPI} = require("@devioarts/capacitor-mdns/electron/mdns-bridge.cjs");
-//...
-// THIS IS IMPORTANT FOR PLUGIN!
-contextBridge.exposeInMainWorld('mDNS', createMDNSAPI({ ipcRenderer }));
-contextBridge.exposeInMainWorld('mdns', createMDNSAPI({ ipcRenderer })) // alias
-```
-
----
 ## API
 
 <docgen-index>
 
+* [`getPluginPlatform()`](#getpluginplatform)
 * [`startBroadcast(...)`](#startbroadcast)
 * [`stopBroadcast()`](#stopbroadcast)
 * [`discover(...)`](#discover)
@@ -100,6 +57,19 @@ contextBridge.exposeInMainWorld('mdns', createMDNSAPI({ ipcRenderer })) // alias
 <!--Update the source file JSDoc comments and rerun docgen to update the docs below-->
 
 Public API surface of the Capacitor mDNS plugin.
+
+### getPluginPlatform()
+
+```typescript
+getPluginPlatform() => Promise<MdnsPluginPlatformResult>
+```
+
+Return the platform implementation currently serving plugin calls.
+
+**Returns:** <code>Promise&lt;<a href="#mdnspluginplatformresult">MdnsPluginPlatformResult</a>&gt;</code>
+
+--------------------
+
 
 ### startBroadcast(...)
 
@@ -149,6 +119,16 @@ Discover services of a given type and optionally filter by instance name.
 
 
 ### Interfaces
+
+
+#### MdnsPluginPlatformResult
+
+Result of getPluginPlatform(). Useful for validating that calls are routed
+through the expected platform bridge.
+
+| Prop           | Type                                                              | Description                                        |
+| -------------- | ----------------------------------------------------------------- | -------------------------------------------------- |
+| **`platform`** | <code><a href="#mdnspluginplatform">MdnsPluginPlatform</a></code> | Platform implementation that produced this result. |
 
 
 #### MdnsBroadcastResult
@@ -229,6 +209,13 @@ Options for Bonjour/mDNS discovery.
 
 
 ### Type Aliases
+
+
+#### MdnsPluginPlatform
+
+Runtime implementation that handled a plugin call.
+
+<code>'ios' | 'android' | 'electron' | 'web'</code>
 
 
 #### MdnsTxt

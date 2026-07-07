@@ -1,16 +1,42 @@
 {
   "name": "@devioarts/capacitor-mdns",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "description": "mDNS plugin for CapacitorJS",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
   "types": "dist/esm/index.d.ts",
   "unpkg": "dist/plugin.js",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/plugin.cjs.js",
+      "default": "./dist/esm/index.js"
+    },
+    "./electron": {
+      "types": "./electron/types-public/index.d.ts",
+      "require": "./electron/dist/plugin.cjs.js",
+      "default": "./electron/dist/plugin.cjs.js"
+    },
+    "./electron/settings": {
+      "types": "./electron/types-public/index.d.ts",
+      "require": "./electron/dist/plugin-settings.js",
+      "default": "./electron/dist/plugin-settings.js"
+    },
+    "./electron/mdns": {
+      "types": "./electron/types-public/index.d.ts",
+      "require": "./electron/dist/plugin.cjs.js",
+      "default": "./electron/dist/plugin.cjs.js"
+    },
+    "./electron/mdns-bridge.cjs": "./electron/mdns-bridge.cjs",
+    "./package.json": "./package.json"
+  },
   "files": [
     "android/src/main/",
     "android/build.gradle",
     "dist/",
     "electron/",
+    "docs/",
     "ios/Sources",
     "ios/Tests",
     "Package.swift",
@@ -45,35 +71,37 @@
     "verify:web": "npm run build",
     "lint": "npm run eslint && npm run prettier -- --check && npm run swiftlint -- lint",
     "fmt": "npm run eslint -- --fix && npm run prettier -- --write && npm run swiftlint -- --fix --format",
-    "eslint": "eslint . --ext ts",
+    "eslint": "eslint src electron --ext ts",
     "prettier": "prettier \"**/*.{css,html,ts,js,java}\" --plugin=prettier-plugin-java",
     "swiftlint": "node-swiftlint",
     "docgen": "docgen --api mDNSPlugin --output-readme README.md --output-json dist/docs.json",
-    "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.mjs",
-    "clean": "rimraf ./dist",
+    "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.mjs && npm run build-electron",
+    "build-electron": "tsc --project electron/tsconfig.json && rollup -c electron/rollup.config.mjs && rimraf ./electron/build",
+    "clean": "rimraf ./dist ./electron/dist ./electron/build",
     "watch": "tsc --watch",
-    "test": "echo \"No test specified\"",
+    "test": "npm run test:e2e",
+    "test:e2e": "rimraf .tmp/e2e-build && tsc -p tsconfig.e2e.json && node --test test/e2e/*.e2e.cjs",
     "prepublishOnly": "npm run build",
     "release": "npm publish --access public"
   },
   "devDependencies": {
-    "@capacitor/android": "^8.4.0",
-    "@capacitor/core": "^8.4.0",
-    "@capacitor/docgen": "^0.3.1",
-    "@capacitor/ios": "^8.4.0",
+    "@capacitor/android": "^8.0.0",
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/docgen": "^0.3.0",
+    "@capacitor/ios": "^8.0.0",
     "@ionic/prettier-config": "^4.0.0",
     "@ionic/swiftlint-config": "^2.0.0",
-    "@typescript-eslint/eslint-plugin": "^8.61.0",
-    "@typescript-eslint/parser": "^8.61.0",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
+    "@typescript-eslint/parser": "^8.63.0",
     "bonjour-service": "^1.4.0",
-    "electron": "^42.4.0",
-    "eslint": "^10.4.1",
-    "prettier": "^3.8.4",
-    "prettier-plugin-java": "^2.9.7",
-    "rimraf": "^6.1.3",
-    "rollup": "^4.61.1",
+    "electron": "^43.0.0",
+    "eslint": "^10.6.0",
+    "prettier": "^3.9.0",
+    "prettier-plugin-java": "^2.10.0",
+    "rimraf": "^6.1.0",
+    "rollup": "^4.62.0",
     "swiftlint": "^2.0.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.0"
   },
   "peerDependencies": {
     "@capacitor/core": ">=8.0.0"

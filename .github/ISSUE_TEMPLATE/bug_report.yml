@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a reproducible problem with capacitor-mdns.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - iOS
+        - Android
+        - Electron
+        - Web
+        - Multiple
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Include @devioarts/capacitor-mdns, Capacitor, OS, and device/emulator versions.
+      placeholder: "@devioarts/capacitor-mdns 0.0.3, Capacitor 8, iOS 18"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal steps or a small repository that reproduces the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant console, native, or Electron logs.
+      render: shell
