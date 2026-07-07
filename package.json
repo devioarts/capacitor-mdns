@@ -19,6 +19,7 @@
       "default": "./electron/dist/plugin.cjs.js"
     },
     "./electron/settings": {
+      "types": "./electron/types-public/index.d.ts",
       "require": "./electron/dist/plugin-settings.js",
       "default": "./electron/dist/plugin-settings.js"
     },

@@ -15,3 +15,11 @@ export declare class mDNS {
   init(): void;
   destroy(): Promise<void>;
 }
+
+export declare const pluginSettings: {
+  readonly pluginClass: 'mDNS';
+  readonly pluginMethods: readonly ['getPluginPlatform', 'startBroadcast', 'stopBroadcast', 'discover'];
+  readonly pluginEvents: readonly [];
+};
+
+export type PluginSettings = typeof pluginSettings;
