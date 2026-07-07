@@ -20,6 +20,7 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "mDNSPlugin"
     public let jsName = "mDNS"
     public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "getPluginPlatform", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "startBroadcast", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopBroadcast", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "discover", returnType: CAPPluginReturnPromise)
@@ -34,12 +35,20 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private func normalizeType(_ raw: String?) -> String {
-        var t = raw ?? "_http._tcp."
+        var t = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if t.isEmpty { t = "_http._tcp." }
         if t.last != "." { t += "." }
         return t
     }
 
     // MARK: - API
+
+    /// getPluginPlatform()
+    @objc public func getPluginPlatform(_ call: CAPPluginCall) {
+        call.resolve([
+            "platform": "ios"
+        ])
+    }
 
     /// startBroadcast({ type?, name?, port, txt? })
     @objc public func startBroadcast(_ call: CAPPluginCall) {
@@ -99,7 +108,7 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
     /// discover({ type?, name?, timeout? })
     @objc public func discover(_ call: CAPPluginCall) {
         let type = normalizeType(call.getString("type"))
-        let targetName = call.getString("name")
+        let targetName = (call.getString("name")?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
         let timeout = call.getInt("timeout") ?? 3000
         let useNW = call.getBool("useNW") ?? true
 

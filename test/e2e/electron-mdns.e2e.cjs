@@ -58,3 +58,63 @@ test('Electron mDNS implementation publishes, discovers, and stops a local servi
     await mdns.destroy();
   }
 });
+
+test('Electron mDNS implementation reports its platform', async () => {
+  const mdns = new mDNS();
+
+  try {
+    const platform = await withTimeout(mdns.getPluginPlatform(), 5000, 'getPluginPlatform');
+    assert.deepEqual(platform, { platform: 'electron' });
+  } finally {
+    await mdns.destroy();
+  }
+});
+
+test('Electron mDNS implementation returns shaped errors for invalid runtime input', async () => {
+  const mdns = new mDNS();
+
+  try {
+    const invalidStart = await withTimeout(mdns.startBroadcast(null), 5000, 'invalid startBroadcast');
+    assert.equal(invalidStart.error, true);
+    assert.equal(invalidStart.publishing, false);
+    assert.equal(invalidStart.name, '');
+    assert.equal(typeof invalidStart.errorMessage, 'string');
+
+    const invalidDiscover = await withTimeout(mdns.discover(null), 5000, 'invalid discover');
+    assert.equal(invalidDiscover.error, false);
+    assert.equal(invalidDiscover.errorMessage, null);
+    assert.equal(invalidDiscover.servicesFound, invalidDiscover.services.length);
+  } finally {
+    await mdns.destroy();
+  }
+});
+
+test('Electron mDNS implementation serializes overlapping startBroadcast calls', async () => {
+  const mdns = new mDNS();
+  const type = '_capmdnsrace._tcp.';
+  const firstName = `CapMDNSRaceA-${process.pid}-${Date.now()}`;
+  const secondName = `CapMDNSRaceB-${process.pid}-${Date.now()}`;
+
+  try {
+    const [first, second] = await withTimeout(
+      Promise.all([
+        mdns.startBroadcast({ type, name: firstName, port: 43211 }),
+        mdns.startBroadcast({ type, name: secondName, port: 43212 }),
+      ]),
+      12000,
+      'overlapping startBroadcast',
+    );
+
+    assert.equal(first.error, false, first.errorMessage);
+    assert.equal(second.error, false, second.errorMessage);
+    assert.equal(first.publishing, true);
+    assert.equal(second.publishing, true);
+
+    const { discovery, match } = await discoverPublishedService(mdns, type, secondName);
+    assert.equal(discovery.error, false, discovery.errorMessage);
+    assert.ok(match, `Latest serialized service was not discovered: ${JSON.stringify(discovery)}`);
+    assert.equal(match.port, 43212);
+  } finally {
+    await mdns.destroy();
+  }
+});

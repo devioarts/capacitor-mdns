@@ -6,11 +6,36 @@
   "module": "dist/esm/index.js",
   "types": "dist/esm/index.d.ts",
   "unpkg": "dist/plugin.js",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/plugin.cjs.js",
+      "default": "./dist/esm/index.js"
+    },
+    "./electron": {
+      "types": "./electron/types-public/index.d.ts",
+      "require": "./electron/dist/plugin.cjs.js",
+      "default": "./electron/dist/plugin.cjs.js"
+    },
+    "./electron/settings": {
+      "require": "./electron/dist/plugin-settings.js",
+      "default": "./electron/dist/plugin-settings.js"
+    },
+    "./electron/mdns": {
+      "types": "./electron/types-public/index.d.ts",
+      "require": "./electron/dist/plugin.cjs.js",
+      "default": "./electron/dist/plugin.cjs.js"
+    },
+    "./electron/mdns-bridge.cjs": "./electron/mdns-bridge.cjs",
+    "./package.json": "./package.json"
+  },
   "files": [
     "android/src/main/",
     "android/build.gradle",
     "dist/",
     "electron/",
+    "docs/",
     "ios/Sources",
     "ios/Tests",
     "Package.swift",
@@ -49,8 +74,9 @@
     "prettier": "prettier \"**/*.{css,html,ts,js,java}\" --plugin=prettier-plugin-java",
     "swiftlint": "node-swiftlint",
     "docgen": "docgen --api mDNSPlugin --output-readme README.md --output-json dist/docs.json",
-    "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.mjs",
-    "clean": "rimraf ./dist",
+    "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.mjs && npm run build-electron",
+    "build-electron": "tsc --project electron/tsconfig.json && rollup -c electron/rollup.config.mjs && rimraf ./electron/build",
+    "clean": "rimraf ./dist ./electron/dist ./electron/build",
     "watch": "tsc --watch",
     "test": "npm run test:e2e",
     "test:e2e": "rimraf .tmp/e2e-build && tsc -p tsconfig.e2e.json && node --test test/e2e/*.e2e.cjs",

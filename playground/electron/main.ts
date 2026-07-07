@@ -5,8 +5,8 @@ import * as path from 'path';
 
 import express from 'express';
 import type { AddressInfo } from 'net';
-// THIS IS IMPORTANT FOR PLUGING!
-import { mDNS } from '@devioarts/capacitor-mdns/electron/mdns';
+// THIS IS IMPORTANT FOR PLUGIN!
+import { mDNS } from '@devioarts/capacitor-mdns/electron';
 const mdns = new mDNS();
 
 const isDev = !app.isPackaged;

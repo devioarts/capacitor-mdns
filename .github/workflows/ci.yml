@@ -14,23 +14,24 @@ concurrency:
 
 jobs:
   typescript:
-    name: TypeScript and web build
+    name: TypeScript, lint, and Electron tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v5
       - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run test:ts
+      - run: npm run lint
       - run: npm run build
+      - run: npm test
 
   android:
     name: Android unit tests and build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v5
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -48,7 +49,7 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v5
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -62,5 +63,5 @@ jobs:
           DEVICE_ID="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ { print $2; exit }')"
           test -n "$DEVICE_ID"
           xcodebuild test \
-            -scheme DevioartsCapacitorTcpclient \
+            -scheme DevioartsCapacitorMdns \
             -destination "id=$DEVICE_ID"

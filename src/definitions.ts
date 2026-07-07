@@ -8,6 +8,22 @@
 export type MdnsTxt = Record<string, string>;
 
 /**
+ * Runtime implementation that handled a plugin call.
+ * @public
+ */
+export type MdnsPluginPlatform = 'ios' | 'android' | 'electron' | 'web';
+
+/**
+ * Result of getPluginPlatform(). Useful for validating that calls are routed
+ * through the expected platform bridge.
+ * @public
+ */
+export interface MdnsPluginPlatformResult {
+  /** Platform implementation that produced this result. */
+  platform: MdnsPluginPlatform;
+}
+
+/**
  * Normalized description of a discovered Bonjour/mDNS service.
  * Returned from {@link mDNSPlugin.discover}.
  *
@@ -53,6 +69,9 @@ export interface MdnsService {
  * - The `type` **must** end with a dot (`.`). If omitted, the implementation appends it.
  * - Instance `name` should be short and human-readable; the OS may append `" (n)"` to ensure uniqueness.
  * - Android NSD does not expose TXT records to other apps; advertising TXT is supported on iOS.
+ * - Native implementations guard publish with a timeout and return `error: true` instead of
+ *   leaving the Promise pending when the OS does not deliver a publish callback.
+ * - Only one advertisement is active at a time. Starting a new one stops the previous one first.
  *
  * @public
  */
@@ -89,6 +108,8 @@ export interface MdnsBroadcastOptions {
  * - The `name` filter matches the normalized name and also accepts prefix matches
  *   (to handle OS-added `" (n)"` suffixes).
  * - When `useNW` is `true` on iOS, discovery uses `NWBrowser` for better P2P behavior.
+ * - Discovery is timeboxed. Concurrent discovery requests are serialized or safely replace
+ *   the previous native session so old callbacks cannot complete a newer request.
  *
  * @public
  */
@@ -186,6 +207,13 @@ export interface MdnsStopResult {
  */
 export interface mDNSPlugin {
   /**
+   * Return the platform implementation currently serving plugin calls.
+   *
+   * @returns Promise resolving to `MdnsPluginPlatformResult`.
+   */
+  getPluginPlatform(): Promise<MdnsPluginPlatformResult>;
+
+  /**
    * Start advertising a Bonjour/mDNS service.
    *
    * @param options - {@link MdnsBroadcastOptions}
@@ -198,6 +226,7 @@ export interface mDNSPlugin {
    *
    * @returns Promise resolving to `MdnsStopResult`.
    * @remarks The `publishing` flag may be `false` after a successful stop.
+   * Stopping is idempotent and is safe to call even if publishing never fully started.
    */
   stopBroadcast(): Promise<MdnsStopResult>;
 

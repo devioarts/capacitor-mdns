@@ -8,6 +8,7 @@ import type {
   MdnsBroadcastResult,
   MdnsStopResult,
   MdnsDiscoverResult,
+  MdnsPluginPlatformResult,
 } from './definitions';
 
 /**
@@ -28,9 +29,16 @@ export class mDNSWeb extends WebPlugin implements mDNSPlugin {
         startBroadcast(o: MdnsBroadcastOptions): Promise<MdnsBroadcastResult>;
         stopBroadcast(): Promise<MdnsStopResult>;
         discover(o?: MdnsDiscoverOptions): Promise<MdnsDiscoverResult>;
+        getPluginPlatform?(): Promise<MdnsPluginPlatformResult>;
       } {
     if (typeof window === 'undefined') return undefined;
     return (window as any).mDNS || (window as any).mdns;
+  }
+
+  async getPluginPlatform(): Promise<MdnsPluginPlatformResult> {
+    const api = this.electronApi;
+    if (api?.getPluginPlatform) return api.getPluginPlatform();
+    return { platform: 'web' };
   }
 
   async startBroadcast(options: MdnsBroadcastOptions): Promise<MdnsBroadcastResult> {

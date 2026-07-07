@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest an improvement for capacitor-mdns.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What use case should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What behavior or API would you like?
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform scope
+      options:
+        - iOS
+        - Android
+        - Electron
+        - Web
+        - Cross-platform
+    validations:
+      required: true

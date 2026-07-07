@@ -10,11 +10,14 @@ import Network
 /// - Resolves each candidate with `NetService` to obtain `port`, `hosts`, and optional TXT.
 /// - Produces a normalized array of dictionaries consumable by the Capacitor bridge.
 public class MDNS: NSObject {
+    private static let publishTimeoutMs = 5000
 
     // MARK: - Advertising
 
     private var publisher: NetService?
     private var publishCompletion: ((Result<String, Error>) -> Void)?
+    private var publishTimeout: DispatchWorkItem?
+    private var publishSession: UInt64 = 0
 
     // MARK: - Discovery state
 
@@ -33,6 +36,8 @@ public class MDNS: NSObject {
 
     /// Completion invoked once with either success(array) or failure(error).
     private var discoverCompletion: ((Result<[[String: Any]], Error>) -> Void)?
+    private var discoveryError: Error?
+    private var discoverySession: UInt64 = 0
 
     /// Timers: hard timeout and short settle debounce.
     private var hardTimeout: DispatchWorkItem?
@@ -60,8 +65,14 @@ public class MDNS: NSObject {
         }
 
         runOnMain { [weak self] in
-            guard let self = self else { return }
-            self.stopPublisherIfNeeded()
+            guard let self = self else {
+                completion(.failure(Self.error("mDNS manager was released before publishing could start")))
+                return
+            }
+
+            self.publishSession &+= 1
+            let session = self.publishSession
+            self.stopPublisherIfNeeded(reason: "Replaced by a new broadcast request")
             self.publishCompletion = completion
 
             let svc = NetService(domain: "local.", type: type, name: name, port: Int32(port))
@@ -76,6 +87,7 @@ public class MDNS: NSObject {
 
             svc.delegate = self
             self.publisher = svc
+            self.schedulePublishTimeout(session: session)
             // Use default publish options; connection listening not required here.
             svc.publish()
         }
@@ -85,7 +97,7 @@ public class MDNS: NSObject {
     /// Exposed as `throws` by the bridge, but this implementation does not throw.
     public func stopBroadcast() throws {
         runOnMain { [weak self] in
-            self?.stopPublisherIfNeeded()
+            self?.stopPublisherIfNeeded(reason: "Publish stopped before completion")
         }
     }
 
@@ -104,24 +116,35 @@ public class MDNS: NSObject {
         completion: @escaping (Result<[[String: Any]], Error>) -> Void
     ) {
         runOnMain { [weak self] in
-            guard let self = self else { return }
+            guard let self = self else {
+                completion(.failure(Self.error("mDNS manager was released before discovery could start")))
+                return
+            }
+
+            if self.discoverCompletion != nil {
+                self.finishDiscovery(error: Self.error("Discovery replaced by a new request"))
+            }
+
+            self.discoverySession &+= 1
+            let session = self.discoverySession
             // Reset session state.
             self.cancelTimers()
             self.stopBrowsers()
             self.resolveMap.removeAll()
             self.discovered.removeAll()
             self.targetName = name
+            self.discoveryError = nil
             self.discoverCompletion = completion
 
             // Schedule hard timeout (always resolves/finishes).
-            let ht = DispatchWorkItem { [weak self] in self?.finishDiscovery() }
+            let ht = DispatchWorkItem { [weak self] in self?.finishDiscovery(session: session) }
             self.hardTimeout = ht
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(max(0, timeoutMs)), execute: ht)
 
             // Start browsing: NWBrowser preferred when available and requested.
             #if canImport(Network)
             if useNW, #available(iOS 12.0, *) {
-                self.startNWBrowse(typeWithDot: type)
+                self.startNWBrowse(typeWithDot: type, session: session)
                 return
             }
             #endif
@@ -139,7 +162,7 @@ public class MDNS: NSObject {
 
     #if canImport(Network)
     @available(iOS 12.0, *)
-    private func startNWBrowse(typeWithDot: String) {
+    private func startNWBrowse(typeWithDot: String, session: UInt64) {
         // NWBrowser expects type without trailing dot.
         let typeNoDot = typeWithDot.hasSuffix(".") ? String(typeWithDot.dropLast()) : typeWithDot
 
@@ -150,14 +173,11 @@ public class MDNS: NSObject {
         self.nwBrowser = browser
 
         browser.stateUpdateHandler = { state in
-            // Intentionally quiet; errors are reflected via timeout or partial results.
-            // print("[mDNS][NW] state: \(state)")
             switch state {
             case .failed(let err):
-                // Do not finish immediately; let the hard timeout deliver partial results.
-                // Optionally, one could trigger a fallback here.
-                // print("[mDNS][NW] failed: \(err)")
-                _ = err // silence unused
+                DispatchQueue.main.async { [weak self] in
+                    self?.finishDiscovery(session: session, error: err)
+                }
             default:
                 break
             }
@@ -165,6 +185,7 @@ public class MDNS: NSObject {
 
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             guard let self = self else { return }
+            guard session == self.discoverySession, self.discoverCompletion != nil else { return }
             for r in results {
                 guard case let NWEndpoint.service(name: n, type: t, domain: d, interface: _) = r.endpoint else { continue }
                 if !self.matchesTarget(n) { continue }
@@ -185,7 +206,7 @@ public class MDNS: NSObject {
                 resolver.resolve(withTimeout: 5.0)
 
                 // Reschedule short settle window on each new find.
-                self.scheduleSettleDebounce()
+                self.scheduleSettleDebounce(session: session)
             }
         }
 
@@ -196,7 +217,9 @@ public class MDNS: NSObject {
     // MARK: - Internal: finalize & helpers
 
     /// Build the final output and complete the discovery promise.
-    private func finishDiscovery() {
+    private func finishDiscovery(session: UInt64? = nil, error: Error? = nil) {
+        if let session = session, session != discoverySession { return }
+
         cancelTimers()
         stopBrowsers()
 
@@ -224,10 +247,16 @@ public class MDNS: NSObject {
         resolveMap.removeAll()
         discovered.removeAll()
         targetName = nil
+        let finalError = error ?? discoveryError
+        discoveryError = nil
 
         let cb = discoverCompletion
         discoverCompletion = nil
-        cb?(.success(out))
+        if let finalError = finalError {
+            cb?(.failure(finalError))
+        } else {
+            cb?(.success(out))
+        }
     }
 
     /// Cancel timers (hard timeout and settle debounce).
@@ -237,9 +266,10 @@ public class MDNS: NSObject {
     }
 
     /// Schedule a short debounce to finish discovery when the system becomes idle.
-    private func scheduleSettleDebounce(_ ms: Int = 350) {
+    private func scheduleSettleDebounce(session: UInt64? = nil, _ ms: Int = 350) {
         settleDebounce?.cancel()
-        let wi = DispatchWorkItem { [weak self] in self?.finishDiscovery() }
+        let session = session ?? discoverySession
+        let wi = DispatchWorkItem { [weak self] in self?.finishDiscovery(session: session) }
         settleDebounce = wi
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms), execute: wi)
     }
@@ -264,12 +294,25 @@ public class MDNS: NSObject {
     }
 
     /// Stop the current publisher, if any.
-    private func stopPublisherIfNeeded() {
+    private func stopPublisherIfNeeded(reason: String) {
+        publishTimeout?.cancel()
+        publishTimeout = nil
         publisher?.stop()
         publisher?.delegate = nil
         publisher = nil
-        publishCompletion?(.failure(Self.error("Publish stopped before completion")))
+        publishCompletion?(.failure(Self.error(reason)))
         publishCompletion = nil
+    }
+
+    /// Enforce that NetService publish cannot leave a JS promise pending forever.
+    private func schedulePublishTimeout(session: UInt64) {
+        publishTimeout?.cancel()
+        let wi = DispatchWorkItem { [weak self] in
+            guard let self = self, session == self.publishSession, self.publishCompletion != nil else { return }
+            self.stopPublisherIfNeeded(reason: "Timed out waiting for service publish after \(Self.publishTimeoutMs)ms")
+        }
+        publishTimeout = wi
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(Self.publishTimeoutMs), execute: wi)
     }
 
     /// Normalize a service name by removing the system-appended `" (n)"` suffix.
@@ -305,12 +348,19 @@ extension MDNS: NetServiceDelegate {
 
     // Publish callbacks
     public func netServiceDidPublish(_ sender: NetService) {
+        guard sender === publisher else { return }
+        publishTimeout?.cancel()
+        publishTimeout = nil
         let cb = publishCompletion
         publishCompletion = nil
         cb?(.success(sender.name))
     }
 
     public func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
+        guard sender === publisher else { return }
+        publishTimeout?.cancel()
+        publishTimeout = nil
+        publisher = nil
         let cb = publishCompletion
         publishCompletion = nil
         let code = (errorDict[NetService.errorCode] as NSNumber?)?.intValue ?? -1
@@ -337,17 +387,17 @@ extension MDNS: NetServiceDelegate {
 
         // Early finish if a specific target is requested and this service matches it.
         if let t = targetName, !t.isEmpty, matchesTarget(sender.name) {
-            finishDiscovery()
+            finishDiscovery(session: discoverySession)
         } else {
             // Otherwise, allow a brief settle window to collect late peers.
-            scheduleSettleDebounce()
+            scheduleSettleDebounce(session: discoverySession)
         }
     }
 
     public func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
         // Drop the unresolved service and try to continue with others.
         resolveMap.removeValue(forKey: sender)
-        scheduleSettleDebounce()
+        scheduleSettleDebounce(session: discoverySession)
     }
 }
 
@@ -375,7 +425,7 @@ extension MDNS: NetServiceBrowserDelegate {
         resolver.resolve(withTimeout: 5.0)
 
         // If this wave ends soon, schedule settle debounce; else wait for more.
-        if !moreComing { scheduleSettleDebounce() }
+        if !moreComing { scheduleSettleDebounce(session: discoverySession) }
     }
 
     public func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
@@ -383,8 +433,13 @@ extension MDNS: NetServiceBrowserDelegate {
     }
 
     public func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
-        // Gracefully complete with whatever we have (plugin will surface error=true).
-        finishDiscovery()
+        let code = (errorDict[NetService.errorCode] as NSNumber?)?.intValue ?? -1
+        let err = NSError(
+            domain: "mDNS.discovery",
+            code: code,
+            userInfo: [NSLocalizedDescriptionKey: "Failed to search for services", "info": errorDict]
+        )
+        finishDiscovery(session: discoverySession, error: err)
     }
 }
 

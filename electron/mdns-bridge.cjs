@@ -6,6 +6,12 @@
 module.exports.createMDNSAPI = ({ ipcRenderer }) => {
   return {
     /**
+     * Return the platform implementation that handled this call.
+     * @returns {Promise<{platform: 'electron'}>}
+     */
+    getPluginPlatform: () => ipcRenderer.invoke('mdns:getPluginPlatform'),
+
+    /**
      * Start advertising a Bonjour/mDNS service.
      * @param {{type?: string, name: string, port: number, txt?: Record<string,string>}} options
      * @returns {Promise<{publishing: boolean, name: string, error: boolean, errorMessage: string|null}>}
