@@ -86,7 +86,7 @@ export interface MdnsBroadcastOptions {
  * Options for Bonjour/mDNS discovery.
  *
  * @remarks
- * - The `id` filter matches the normalized name and also accepts prefix matches
+ * - The `name` filter matches the normalized name and also accepts prefix matches
  *   (to handle OS-added `" (n)"` suffixes).
  * - When `useNW` is `true` on iOS, discovery uses `NWBrowser` for better P2P behavior.
  *

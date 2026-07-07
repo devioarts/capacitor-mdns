@@ -48,7 +48,7 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
         let port = call.getInt("port") ?? 0
         let txt  = call.getObject("txt") as? [String: String]
 
-        guard port > 0 else {
+        guard (1...65535).contains(port) else {
             call.resolve([
                 "publishing": false,
                 "name": "",

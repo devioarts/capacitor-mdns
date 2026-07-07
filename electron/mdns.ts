@@ -1,4 +1,3 @@
-import type { Service, Browser } from 'bonjour-service';
 import Bonjour from 'bonjour-service';
 import { ipcMain } from 'electron';
 
@@ -9,7 +8,10 @@ import type {
   MdnsDiscoverResult,
   MdnsService,
   MdnsStopResult,
-} from '../src';
+} from '../src/definitions';
+
+type Service = InstanceType<typeof Bonjour.Service>;
+type Browser = InstanceType<typeof Bonjour.Browser>;
 
 /**
  * Electron main-process implementation of the mDNS/Bonjour functionality.
@@ -24,6 +26,8 @@ import type {
  * - TXT records are forwarded as strings when present.
  */
 export class mDNS {
+  private readonly publishTimeoutMs = 5000;
+
   //<editor-fold desc="Init/Destroy">
   private ipcRegistered = false;
   private registerIpc(): void {
@@ -75,6 +79,9 @@ export class mDNS {
   // ----------------------------- utils -----------------------------
   private toErr(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
+  }
+  private validatePort(port: number | undefined): string | null {
+    return Number.isInteger(port) && port !== undefined && port > 0 && port <= 65535 ? null : 'Missing/invalid port';
   }
 
   private normalize(name: string): string {
@@ -129,16 +136,23 @@ export class mDNS {
    * @param options See MdnsBroadcastOptions for type/name/port/txt.
    * @returns Result indicating whether publishing is active and the final name.
    */
-  // BUG [significant]: No timeout on `startBroadcast`. If the 'up' event never fires
-  // and no 'error' event fires either (e.g. bonjour-service silently fails to bind),
-  // the returned Promise will hang indefinitely, leaving the JS caller blocked.
   async startBroadcast(options: MdnsBroadcastOptions): Promise<MdnsBroadcastResult> {
+    const portError = this.validatePort(options.port);
+    if (portError) return { publishing: false, name: '', error: true, errorMessage: portError };
+
+    await this.stopBroadcast();
+
     const { type, protocol } = this.parseType(options.type);
     return new Promise<MdnsBroadcastResult>((resolve) => {
       let settled = false;
+      let timeout: NodeJS.Timeout | null = null;
       const safeResolve = (r: MdnsBroadcastResult) => {
         if (!settled) {
           settled = true;
+          if (timeout) {
+            clearTimeout(timeout);
+            timeout = null;
+          }
           resolve(r);
         }
       };
@@ -175,9 +189,26 @@ export class mDNS {
           }
           safeResolve({ publishing: false, name: '', error: true, errorMessage: this.toErr(err) });
         };
+        const onTimeout = () => {
+          try {
+            svc.removeListener('up', onUp);
+            svc.removeListener('error', onError);
+          } catch {
+            /* ignore */
+          }
+          void this.safeStopService(svc);
+          if (this.advertiser === svc) this.advertiser = undefined;
+          safeResolve({
+            publishing: false,
+            name: '',
+            error: true,
+            errorMessage: `Timed out waiting for service publish after ${this.publishTimeoutMs}ms`,
+          });
+        };
 
         svc.once('up', onUp);
         svc.once('error', onError);
+        timeout = setTimeout(onTimeout, this.publishTimeoutMs);
         this.advertiser = svc;
       } catch (e) {
         safeResolve({ publishing: false, name: '', error: true, errorMessage: this.toErr(e) });
@@ -219,8 +250,11 @@ export class mDNS {
 
     return new Promise<MdnsDiscoverResult>((resolve) => {
       let timer: NodeJS.Timeout | null = null;
+      let settled = false;
 
       const finish = () => {
+        if (settled) return;
+        settled = true;
         if (browser) {
           this.safeStopBrowser(browser);
           browser = null;
@@ -246,7 +280,7 @@ export class mDNS {
             domain: 'local.',
             port: s.port ?? 0,
             hosts: Array.isArray(s.addresses) ? s.addresses.slice() : [],
-            txt: s.txt && Object.keys(s.txt).length ? (s.txt as Record<string, string>) : undefined,
+            txt: s.txt && Object.keys(s.txt).length ? this.normalizeTxt(s.txt) : undefined,
           };
           const key = `${item.name}:${item.port}`;
           if (!services.some((x) => `${x.name}:${x.port}` === key)) services.push(item);
@@ -254,17 +288,23 @@ export class mDNS {
         });
 
         // Record error and let the timeout conclude; results will still be returned.
-        browser.on('error', (err: unknown) => {
+        (browser as any).on('error', (err: unknown) => {
           hadError = true;
           errMsg = this.toErr(err);
         });
 
-        timer = setTimeout(finish, timeoutMs);
+        timer = setTimeout(finish, Math.max(0, timeoutMs));
       } catch (err) {
         hadError = true;
         errMsg = this.toErr(err);
         finish();
       }
     });
+  }
+
+  private normalizeTxt(txt: Record<string, unknown>): Record<string, string> {
+    return Object.fromEntries(
+      Object.entries(txt).map(([key, value]) => [key, Buffer.isBuffer(value) ? value.toString('utf8') : String(value)]),
+    );
   }
 }

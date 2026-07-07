@@ -1,9 +1,4 @@
-<!-- NOTE [significant]: This manifest declares no permissions.
-     The app's AndroidManifest.xml must include:
-       <uses-permission android:name="android.permission.INTERNET" />
-       <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-     CHANGE_WIFI_MULTICAST_STATE is required on many Android devices for mDNS multicast packets
-     to be received; without it, discovery silently returns no results on real hardware.
-     The plugin manifest should declare these so they are merged automatically. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 </manifest>

@@ -54,14 +54,17 @@ public class MDNS: NSObject {
         txt: [String: String]?,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
+        guard (1...65535).contains(port) else {
+            completion(.failure(Self.error("Missing/invalid port")))
+            return
+        }
+
         runOnMain { [weak self] in
             guard let self = self else { return }
             self.stopPublisherIfNeeded()
             self.publishCompletion = completion
 
-            // NOTE [minor]: Port is cast to Int32 but not validated against the upper bound 65535.
-        // A Swift Int can exceed Int32.max; the bridge validates > 0 but not <= 65535.
-        let svc = NetService(domain: "local.", type: type, name: name, port: Int32(port))
+            let svc = NetService(domain: "local.", type: type, name: name, port: Int32(port))
             svc.includesPeerToPeer = true
 
             if let txt = txt {
@@ -80,9 +83,6 @@ public class MDNS: NSObject {
 
     /// Stop the currently advertised service (no-op safe).
     /// Exposed as `throws` by the bridge, but this implementation does not throw.
-    // NOTE [minor]: Declared `throws` but the implementation never throws.
-    // The bridge wraps calls in try/catch that will never catch anything here.
-    // Consider removing `throws` in a future refactor.
     public func stopBroadcast() throws {
         runOnMain { [weak self] in
             self?.stopPublisherIfNeeded()
@@ -268,9 +268,7 @@ public class MDNS: NSObject {
         publisher?.stop()
         publisher?.delegate = nil
         publisher = nil
-        // BUG [significant]: If `startBroadcast` is called while a previous broadcast is still
-        // in-flight (completion not yet fired), dropping `publishCompletion` here silently abandons
-        // the pending JS promise — the first caller will never receive a response.
+        publishCompletion?(.failure(Self.error("Publish stopped before completion")))
         publishCompletion = nil
     }
 
@@ -294,6 +292,10 @@ public class MDNS: NSObject {
     /// Ensure execution on main queue (NSNetServices expect main run loop).
     private func runOnMain(_ block: @escaping () -> Void) {
         if Thread.isMainThread { block() } else { DispatchQueue.main.async(execute: block) }
+    }
+
+    private static func error(_ message: String) -> NSError {
+        return NSError(domain: "mDNS", code: -1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }
 
@@ -325,8 +327,8 @@ extension MDNS: NetServiceDelegate {
         guard let box = resolveMap[sender] else { return }
         box.port = Int(sender.port)
         box.hosts = parseHosts(sender.addresses)
-        if let txtData = sender.txtRecordData(),
-           let dict = NetService.dictionary(fromTXTRecord: txtData) as? [String: Data] {
+        if let txtData = sender.txtRecordData() {
+            let dict = NetService.dictionary(fromTXTRecord: txtData)
             box.txt = dict.reduce(into: [:]) { acc, e in
                 acc[e.key] = String(data: e.value, encoding: .utf8) ?? ""
             }
@@ -357,10 +359,8 @@ extension MDNS: NetServiceBrowserDelegate {
         // Early filter by instance name.
         guard matchesTarget(service.name) else { return }
 
-        // BUG [significant]: No deduplication check here, unlike the NWBrowser path which
-        // guards with `discovered.contains(where: { $0.identityKey == key })`.
-        // If the delegate fires twice for the same service, duplicate entries are added.
-        // Fix: add `let key = keyFor(...); if discovered.contains(where: ...) { return }` here.
+        let key = keyFor(name: service.name, type: service.type, domain: service.domain)
+        if discovered.contains(where: { $0.identityKey == key }) { return }
 
         // Create a dedicated resolver (do not reuse `service` directly).
         let resolver = NetService(domain: service.domain, type: service.type, name: service.name)

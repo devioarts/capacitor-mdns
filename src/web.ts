@@ -19,6 +19,8 @@ import type {
  *   and log a console message with the [WEB_NOT_SUPPORTED] tag.
  */
 export class mDNSWeb extends WebPlugin implements mDNSPlugin {
+  private readonly unsupportedMessage = 'mDNS is not supported in this browser runtime';
+
   /** Electron preload bridge (if present). */
   private get electronApi():
     | undefined
@@ -35,10 +37,7 @@ export class mDNSWeb extends WebPlugin implements mDNSPlugin {
     const api = this.electronApi;
     if (api?.startBroadcast) return api.startBroadcast(options);
     console.log('[WEB_NOT_SUPPORTED] startBroadcast', options);
-    // BUG [significant]: Returns `publishing: true` even though nothing is being published.
-    // The caller has no way to distinguish a successful Electron IPC call from this no-op stub.
-    // Should return `{ publishing: false, error: true, errorMessage: 'Not supported in browser' }`.
-    return { publishing: true, name: '', error: false, errorMessage: null };
+    return { publishing: false, name: '', error: true, errorMessage: this.unsupportedMessage };
   }
 
   async stopBroadcast(): Promise<MdnsStopResult> {
@@ -52,6 +51,6 @@ export class mDNSWeb extends WebPlugin implements mDNSPlugin {
     const api = this.electronApi;
     if (api?.discover) return api.discover(options);
     console.log('[WEB_NOT_SUPPORTED] discover', options);
-    return { services: [], error: false, errorMessage: null, servicesFound: 0 };
+    return { services: [], error: true, errorMessage: this.unsupportedMessage, servicesFound: 0 };
   }
 }

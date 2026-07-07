@@ -84,7 +84,7 @@ class mDNSPlugin : Plugin() {
         val name = call.getString("name") ?: (context?.packageName ?: "DevIOArtsMDNS")
         val port = call.getInt("port") ?: 0
 
-        if (port <= 0) {
+        if (port !in 1..65535) {
             call.resolve(jsResultBroadcast(false, "", true, "Missing/invalid port"))
             return
         }

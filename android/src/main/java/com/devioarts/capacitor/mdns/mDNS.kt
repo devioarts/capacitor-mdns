@@ -73,7 +73,7 @@ class mDNS(
         onSuccess: (String) -> Unit,
         onError: (Throwable) -> Unit
     ) {
-        require(port > 0) { "Port must be > 0" }
+        require(port in 1..65535) { "Port must be between 1 and 65535" }
         val type = if (typeRaw.endsWith(".")) typeRaw else "$typeRaw."
 
         runOnMain {
@@ -227,7 +227,7 @@ class mDNS(
         nsd.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, listener)
 
         val timeoutJob = scope.launch {
-            delay(timeoutMs.toLong())
+            delay(timeoutMs.coerceAtLeast(0).toLong())
             completeWithCurrentResults(listener)
         }
 

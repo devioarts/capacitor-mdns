@@ -13,10 +13,9 @@ npx cap sync
 ```
 
 ## Android
-#### /android/app/src/main/AndroidManifest.xml
-```xml
-<uses-permission android:name="android.permission.INTERNET" />
-```
+The plugin declares the required `INTERNET` and `CHANGE_WIFI_MULTICAST_STATE` permissions in its
+Android manifest so they are merged into your app automatically. On some devices, mDNS discovery
+will return no results if multicast traffic is blocked by the network or device policy.
 
 ## iOS
 #### /ios/App/App/Info.plist
@@ -34,11 +33,14 @@ npx cap sync
 </array>
 ```
 
+Add every service type you use to `NSBonjourServices` (for example `_capmdnse2e._tcp` for a
+custom `_capmdnse2e._tcp.` service).
+
 ---
 ## ElectronJS
 
 ```shell
-npm i bonjour-service@1.3.0
+npm i bonjour-service@1.4.0
 ```
 
 > Implementation example was developed on [capacitor-electron](https://github.com/devioarts/capacitor-examples/tree/main/capacitor-electron)
