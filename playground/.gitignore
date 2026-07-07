@@ -15,7 +15,7 @@ dist-ssr
 # Internal files
 android
 ios
-electron/main.cjs
+electron
 
 # Editor directories and files
 .vscode/*
