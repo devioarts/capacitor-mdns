@@ -10,14 +10,14 @@ The in-repository [`playground`](./playground) is the example app used during de
 ## Install
 
 ```bash
-npm install @devioarts/capacitor-mdns
+npm install @byrds/capacitor-mdns
 npx cap sync
 ```
 
 ## Usage
 
 ```ts
-import { mDNS } from '@devioarts/capacitor-mdns';
+import { mDNS } from '@byrds/capacitor-mdns';
 
 const runtime = await mDNS.getPluginPlatform();
 
@@ -230,6 +230,8 @@ Values are UTF-8 strings; binary payloads are not supported by this API.
 
 Construct a type with a set of properties K of type T
 
-<code>{ [P in K]: T; }</code>
+<code>{
+ [P in K]: T;
+ }</code>
 
 </docgen-api>
