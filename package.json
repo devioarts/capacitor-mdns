@@ -81,6 +81,7 @@
     "watch": "tsc --watch",
     "test": "npm run test:e2e",
     "test:e2e": "rimraf .tmp/e2e-build && tsc -p tsconfig.e2e.json && node --test test/e2e/*.e2e.cjs",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build",
     "release": "npm publish --access public"
   },
