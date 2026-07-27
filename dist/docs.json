@@ -1,0 +1,519 @@
+{
+  "api": {
+    "name": "mDNSPlugin",
+    "slug": "mdnsplugin",
+    "docs": "Public API surface of the Capacitor mDNS plugin.",
+    "tags": [
+      {
+        "text": "```ts\nimport { mDNS } from 'capacitor-mdns';\n\n// Start advertising\nawait mDNS.startBroadcast({ type: '_http._tcp.', name: 'my.app.id', port: 9235 });\n\n// Discover services\nconst { services } = await mDNS.discover({ type: '_http._tcp.', timeout: 3000 });\n\n// Stop advertising\nawait mDNS.stopBroadcast();\n```",
+        "name": "example"
+      },
+      {
+        "name": "public"
+      }
+    ],
+    "methods": [
+      {
+        "name": "getPluginPlatform",
+        "signature": "() => Promise<MdnsPluginPlatformResult>",
+        "parameters": [],
+        "returns": "Promise<MdnsPluginPlatformResult>",
+        "tags": [
+          {
+            "name": "returns",
+            "text": "Promise resolving to `MdnsPluginPlatformResult`."
+          }
+        ],
+        "docs": "Return the platform implementation currently serving plugin calls.",
+        "complexTypes": [
+          "MdnsPluginPlatformResult"
+        ],
+        "slug": "getpluginplatform"
+      },
+      {
+        "name": "startBroadcast",
+        "signature": "(options: MdnsBroadcastOptions) => Promise<MdnsBroadcastResult>",
+        "parameters": [
+          {
+            "name": "options",
+            "docs": "- {@link MdnsBroadcastOptions}",
+            "type": "MdnsBroadcastOptions"
+          }
+        ],
+        "returns": "Promise<MdnsBroadcastResult>",
+        "tags": [
+          {
+            "name": "param",
+            "text": "options - {@link MdnsBroadcastOptions}"
+          },
+          {
+            "name": "returns",
+            "text": "Promise resolving to `MdnsBroadcastResult` (`true` on success)."
+          }
+        ],
+        "docs": "Start advertising a Bonjour/mDNS service.",
+        "complexTypes": [
+          "MdnsBroadcastResult",
+          "MdnsBroadcastOptions"
+        ],
+        "slug": "startbroadcast"
+      },
+      {
+        "name": "stopBroadcast",
+        "signature": "() => Promise<MdnsStopResult>",
+        "parameters": [],
+        "returns": "Promise<MdnsStopResult>",
+        "tags": [
+          {
+            "name": "returns",
+            "text": "Promise resolving to `MdnsStopResult`."
+          },
+          {
+            "name": "remarks",
+            "text": "The `publishing` flag may be `false` after a successful stop.\nStopping is idempotent and is safe to call even if publishing never fully started."
+          }
+        ],
+        "docs": "Stop advertising the currently registered service (no-op if none).",
+        "complexTypes": [
+          "MdnsStopResult"
+        ],
+        "slug": "stopbroadcast"
+      },
+      {
+        "name": "discover",
+        "signature": "(options?: MdnsDiscoverOptions | undefined) => Promise<MdnsDiscoverResult>",
+        "parameters": [
+          {
+            "name": "options",
+            "docs": "- {@link MdnsDiscoverOptions}",
+            "type": "MdnsDiscoverOptions | undefined"
+          }
+        ],
+        "returns": "Promise<MdnsDiscoverResult>",
+        "tags": [
+          {
+            "name": "param",
+            "text": "options - {@link MdnsDiscoverOptions}"
+          },
+          {
+            "name": "returns",
+            "text": "Promise resolving to `MdnsDiscoverResult`."
+          },
+          {
+            "name": "remarks",
+            "text": "The result list is normalized across platforms. On Android, `txt` is typically absent."
+          }
+        ],
+        "docs": "Discover services of a given type and optionally filter by instance name.",
+        "complexTypes": [
+          "MdnsDiscoverResult",
+          "MdnsDiscoverOptions"
+        ],
+        "slug": "discover"
+      }
+    ],
+    "properties": []
+  },
+  "interfaces": [
+    {
+      "name": "MdnsPluginPlatformResult",
+      "slug": "mdnspluginplatformresult",
+      "docs": "Result of getPluginPlatform(). Useful for validating that calls are routed\nthrough the expected platform bridge.",
+      "tags": [
+        {
+          "name": "public"
+        }
+      ],
+      "methods": [],
+      "properties": [
+        {
+          "name": "platform",
+          "tags": [],
+          "docs": "Platform implementation that produced this result.",
+          "complexTypes": [
+            "MdnsPluginPlatform"
+          ],
+          "type": "MdnsPluginPlatform"
+        }
+      ]
+    },
+    {
+      "name": "MdnsBroadcastResult",
+      "slug": "mdnsbroadcastresult",
+      "docs": "Result of startBroadcast(). Indicates whether advertising is active\nand the final service name. On failure, `error` is true and `errorMessage`\ndescribes the issue.",
+      "tags": [
+        {
+          "name": "public"
+        }
+      ],
+      "methods": [],
+      "properties": [
+        {
+          "name": "error",
+          "tags": [],
+          "docs": "True if the operation failed.",
+          "complexTypes": [],
+          "type": "boolean"
+        },
+        {
+          "name": "errorMessage",
+          "tags": [],
+          "docs": "Error description or null on success.",
+          "complexTypes": [],
+          "type": "string | null"
+        },
+        {
+          "name": "name",
+          "tags": [],
+          "docs": "Final (possibly uniquified) service instance name. Empty on failure.",
+          "complexTypes": [],
+          "type": "string"
+        },
+        {
+          "name": "publishing",
+          "tags": [],
+          "docs": "Whether the advertiser is currently active.",
+          "complexTypes": [],
+          "type": "boolean"
+        }
+      ]
+    },
+    {
+      "name": "MdnsBroadcastOptions",
+      "slug": "mdnsbroadcastoptions",
+      "docs": "Options for starting a Bonjour/mDNS advertisement.",
+      "tags": [
+        {
+          "text": "- The `type` **must** end with a dot (`.`). If omitted, the implementation appends it.\n- Instance `name` should be short and human-readable; the OS may append `\" (n)\"` to ensure uniqueness.\n- Android NSD does not expose TXT records to other apps; advertising TXT is supported on iOS.\n- Native implementations guard publish with a timeout and return `error: true` instead of\n  leaving the Promise pending when the OS does not deliver a publish callback.\n- Only one advertisement is active at a time. Starting a new one stops the previous one first.",
+          "name": "remarks"
+        },
+        {
+          "name": "public"
+        }
+      ],
+      "methods": [],
+      "properties": [
+        {
+          "name": "type",
+          "tags": [
+            {
+              "text": "`\"_http._tcp.\"`",
+              "name": "defaultValue"
+            },
+            {
+              "text": "`\"_myapp._tcp.\"`",
+              "name": "example"
+            }
+          ],
+          "docs": "Service type (including the trailing dot).",
+          "complexTypes": [],
+          "type": "string | undefined"
+        },
+        {
+          "name": "name",
+          "tags": [],
+          "docs": "Service instance name.",
+          "complexTypes": [],
+          "type": "string"
+        },
+        {
+          "name": "port",
+          "tags": [
+            {
+              "text": "Must be a positive integer (1–65535).",
+              "name": "remarks"
+            }
+          ],
+          "docs": "TCP port to advertise.",
+          "complexTypes": [],
+          "type": "number"
+        },
+        {
+          "name": "txt",
+          "tags": [
+            {
+              "text": "May be ignored on Android due to platform limitations.",
+              "name": "remarks"
+            }
+          ],
+          "docs": "Optional TXT key–value pairs (UTF-8 strings).",
+          "complexTypes": [
+            "MdnsTxt"
+          ],
+          "type": "MdnsTxt"
+        }
+      ]
+    },
+    {
+      "name": "MdnsStopResult",
+      "slug": "mdnsstopresult",
+      "docs": "Result of stopBroadcast(). Indicates whether the advertiser is active\nafter the call (normally false) and includes error information.",
+      "tags": [
+        {
+          "name": "public"
+        }
+      ],
+      "methods": [],
+      "properties": [
+        {
+          "name": "error",
+          "tags": [],
+          "docs": "True if an error occurred while stopping.",
+          "complexTypes": [],
+          "type": "boolean"
+        },
+        {
+          "name": "errorMessage",
+          "tags": [],
+          "docs": "Error description or null on success.",
+          "complexTypes": [],
+          "type": "string | null"
+        },
+        {
+          "name": "publishing",
+          "tags": [],
+          "docs": "Whether the advertiser remains active (should be false on success).",
+          "complexTypes": [],
+          "type": "boolean"
+        }
+      ]
+    },
+    {
+      "name": "MdnsDiscoverResult",
+      "slug": "mdnsdiscoverresult",
+      "docs": "Result of discover(). Contains normalized services and error information.",
+      "tags": [
+        {
+          "name": "public"
+        }
+      ],
+      "methods": [],
+      "properties": [
+        {
+          "name": "error",
+          "tags": [],
+          "docs": "True if discovery encountered an error (partial results may still be present).",
+          "complexTypes": [],
+          "type": "boolean"
+        },
+        {
+          "name": "errorMessage",
+          "tags": [],
+          "docs": "Error description or null when no error occurred.",
+          "complexTypes": [],
+          "type": "string | null"
+        },
+        {
+          "name": "servicesFound",
+          "tags": [],
+          "docs": "Convenience count equal to services.length.",
+          "complexTypes": [],
+          "type": "number"
+        },
+        {
+          "name": "services",
+          "tags": [],
+          "docs": "Normalized list of discovered services.",
+          "complexTypes": [
+            "MdnsService"
+          ],
+          "type": "MdnsService[]"
+        }
+      ]
+    },
+    {
+      "name": "MdnsService",
+      "slug": "mdnsservice",
+      "docs": "Normalized description of a discovered Bonjour/mDNS service.\nReturned from {@link mDNSPlugin.discover}.",
+      "tags": [
+        {
+          "text": "- `hosts` contains resolved IPv4/IPv6 numeric addresses (no DNS names).\n- iOS returns `txt` when present. Android (NSD) does not expose TXT records via public APIs,\n  so `txt` is usually omitted on Android.\n- `domain` is typically `\"local.\"`.",
+          "name": "remarks"
+        },
+        {
+          "name": "public"
+        }
+      ],
+      "methods": [],
+      "properties": [
+        {
+          "name": "name",
+          "tags": [],
+          "docs": "Instance name of the service (may be uniqued by the OS, e.g. \"My App (2)\").",
+          "complexTypes": [],
+          "type": "string"
+        },
+        {
+          "name": "type",
+          "tags": [],
+          "docs": "Full service type including the trailing dot, e.g. `\"_http._tcp.\"`.",
+          "complexTypes": [],
+          "type": "string"
+        },
+        {
+          "name": "domain",
+          "tags": [],
+          "docs": "Service domain; typically `\"local.\"`.",
+          "complexTypes": [],
+          "type": "string"
+        },
+        {
+          "name": "port",
+          "tags": [],
+          "docs": "TCP port the service advertises.",
+          "complexTypes": [],
+          "type": "number"
+        },
+        {
+          "name": "hosts",
+          "tags": [
+            {
+              "text": "`[\"192.168.1.42\", \"fe80::1234:abcd:...\"]`",
+              "name": "example"
+            }
+          ],
+          "docs": "Resolved numeric IP addresses (IPv4/IPv6).",
+          "complexTypes": [],
+          "type": "string[]"
+        },
+        {
+          "name": "txt",
+          "tags": [
+            {
+              "text": "Not all services publish TXT data.",
+              "name": "remarks"
+            }
+          ],
+          "docs": "TXT dictionary (key → value). Usually present on iOS; Android NSD does not populate this.",
+          "complexTypes": [
+            "MdnsTxt"
+          ],
+          "type": "MdnsTxt"
+        }
+      ]
+    },
+    {
+      "name": "MdnsDiscoverOptions",
+      "slug": "mdnsdiscoveroptions",
+      "docs": "Options for Bonjour/mDNS discovery.",
+      "tags": [
+        {
+          "text": "- The `name` filter matches the normalized name and also accepts prefix matches\n  (to handle OS-added `\" (n)\"` suffixes).\n- When `useNW` is `true` on iOS, discovery uses `NWBrowser` for better P2P behavior.\n- Discovery is timeboxed. Concurrent discovery requests are serialized or safely replace\n  the previous native session so old callbacks cannot complete a newer request.",
+          "name": "remarks"
+        },
+        {
+          "name": "public"
+        }
+      ],
+      "methods": [],
+      "properties": [
+        {
+          "name": "type",
+          "tags": [
+            {
+              "text": "`\"_http._tcp.\"`",
+              "name": "defaultValue"
+            },
+            {
+              "text": "`\"_comm._tcp.\"`",
+              "name": "example"
+            }
+          ],
+          "docs": "Service type (including the trailing dot).",
+          "complexTypes": [],
+          "type": "string | undefined"
+        },
+        {
+          "name": "name",
+          "tags": [
+            {
+              "text": "`\"MyAppName\"`",
+              "name": "example"
+            }
+          ],
+          "docs": "Optional instance name filter (prefix-safe).",
+          "complexTypes": [],
+          "type": "string | undefined"
+        },
+        {
+          "name": "timeout",
+          "tags": [
+            {
+              "text": "`3000`",
+              "name": "defaultValue"
+            }
+          ],
+          "docs": "Discovery timeout in milliseconds.",
+          "complexTypes": [],
+          "type": "number | undefined"
+        },
+        {
+          "name": "useNW",
+          "tags": [
+            {
+              "text": "`true`",
+              "name": "defaultValue"
+            }
+          ],
+          "docs": "iOS-only hint to use `NWBrowser` instead of `NetServiceBrowser`.",
+          "complexTypes": [],
+          "type": "boolean | undefined"
+        }
+      ]
+    }
+  ],
+  "enums": [],
+  "typeAliases": [
+    {
+      "name": "MdnsPluginPlatform",
+      "slug": "mdnspluginplatform",
+      "docs": "Runtime implementation that handled a plugin call.",
+      "types": [
+        {
+          "text": "'ios'",
+          "complexTypes": []
+        },
+        {
+          "text": "'android'",
+          "complexTypes": []
+        },
+        {
+          "text": "'electron'",
+          "complexTypes": []
+        },
+        {
+          "text": "'web'",
+          "complexTypes": []
+        }
+      ]
+    },
+    {
+      "name": "MdnsTxt",
+      "slug": "mdnstxt",
+      "docs": "Key–value map for TXT records of a Bonjour/mDNS service.\nValues are UTF-8 strings; binary payloads are not supported by this API.",
+      "types": [
+        {
+          "text": "Record<string, string>",
+          "complexTypes": [
+            "Record"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Record",
+      "slug": "record",
+      "docs": "Construct a type with a set of properties K of type T",
+      "types": [
+        {
+          "text": "{\r\n    [P in K]: T;\r\n}",
+          "complexTypes": [
+            "K",
+            "T"
+          ]
+        }
+      ]
+    }
+  ],
+  "pluginConfigs": []
+}
