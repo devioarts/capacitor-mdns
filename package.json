@@ -1,5 +1,5 @@
 {
-  "name": "@devioarts/capacitor-mdns",
+  "name": "@byrds/capacitor-mdns",
   "version": "0.1.0",
   "description": "mDNS plugin for CapacitorJS",
   "main": "dist/plugin.cjs.js",
@@ -46,10 +46,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/devioarts/capacitor-mdns.git"
+    "url": "git+https://github.com/byrdsandbytes/capacitor-mdns.git"
   },
   "bugs": {
-    "url": "https://github.com/devioarts/capacitor-mdns/issues"
+    "url": "https://github.com/byrdsandbytes/capacitor-mdns/issues"
   },
   "keywords": [
     "capacitor",
