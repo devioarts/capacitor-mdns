@@ -12,3 +12,9 @@
   previous native session so stale callbacks cannot complete a newer request.
 - `stopBroadcast()` is idempotent and safe to call repeatedly, including after failed or timed-out
   publish attempts.
+- On iOS a denied Local Network permission makes `discover()` report an error instead of returning an
+  empty list after the timeout.
+- Android resolves discovered services one at a time before API 34 (a platform limit of
+  `NsdManager.resolveService`); on API 34+ resolves run concurrently.
+- A service `type` must look like `_name._tcp.` or `_name._udp.` (trailing dot optional). Electron
+  rejects anything else with an error; it never falls back to another type.

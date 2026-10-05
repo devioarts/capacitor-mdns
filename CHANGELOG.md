@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Android: NSD callbacks (delivered on NsdManager's internal thread) are now marshalled to the main thread before touching any state, removing data races between discovery results, the timeout, and publish completion. A publish confirmation racing the publish timeout can no longer complete the call twice.
+- Android: before API 34 only one `resolveService` may be active, so concurrent resolves were silently dropped and services lost. Resolves are now queued, retried on `FAILURE_ALREADY_ACTIVE`, and individually timed out.
+- Android: stopping or replacing a registration that the OS has not confirmed yet no longer calls `unregisterService` too early; a late confirmation is unregistered when it arrives. `close()` now fails a pending `discover()` instead of leaving it waiting.
+- iOS: discovery no longer finishes while a resolver is still outstanding, which could return an empty or partial list when a resolve took longer than the 350 ms settle window.
+- iOS: the `NWBrowser` duplicate check used un-normalized type/domain, so every browse update spawned new resolvers for already known services.
+- iOS: a denied Local Network permission is now reported as an error instead of an empty discovery result.
+- iOS: `txt` values that are not strings are skipped instead of dropping the whole TXT record.
+
+- Electron: a malformed service type (e.g. `http`, `_http._xyz.`) is now rejected with an error instead of being silently advertised/browsed as `_http._tcp.`, matching iOS and Android. An invalid type no longer stops a broadcast that is already running.
+- Electron: non-finite `timeout` values (`NaN`, `Infinity`) used to end discovery after ~1 ms; they now fall back to the 3000 ms default, and delays are clamped to the timer maximum.
+- Electron: `destroy()` now ends in-flight discoveries (returning partial results flagged as an error) instead of leaving them waiting for their timeout, and a late browser event can no longer mutate an already returned result.
+
+### Changed
+
+- `bonjour-service` is declared as an optional peer dependency (needed by Electron apps only).
+- Electron: `new mDNS(bonjour?, options?)` accepts an injectable Bonjour implementation and timeouts for tests.
+- Android: NSD access moved behind an internal `NsdBackend` seam (`AndroidNsdBackend` in production) so the logic is unit-testable on the JVM.
+- iOS: `MDNS` exposes internal factories and timers for tests.
+
+### Tests
+
+- Added 15 network-free Electron tests (fake Bonjour: type/port validation, publish errors and timeout, filtering, dedup, early exit, timeout handling, destroy).
+- Added JVM unit tests for the Android manager (19 cases: callback threading, publish timeout/replace/stop, legacy resolve queue, early exit, close) and XCTest cases for the iOS manager (14 cases). Removed the template placeholder tests.
+
 ## [0.1.0]
 
 Compared with `v0.0.3`.

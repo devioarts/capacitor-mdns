@@ -10,7 +10,20 @@ import Network
 /// - Resolves each candidate with `NetService` to obtain `port`, `hosts`, and optional TXT.
 /// - Produces a normalized array of dictionaries consumable by the Capacitor bridge.
 public class MDNS: NSObject {
-    private static let publishTimeoutMs = 5000
+    // Tunables and seams. Internal (not private) so unit tests can shorten timers and inject fake services.
+    internal var publishTimeoutMs = 5000
+    internal var settleDebounceMs = 350
+    internal var resolveTimeoutSeconds: TimeInterval = 5.0
+    internal var makeBrowser: () -> NetServiceBrowser = { NetServiceBrowser() }
+    internal var makeService: (_ domain: String, _ type: String, _ name: String, _ port: Int32?) -> NetService =
+        MDNS.defaultMakeService
+
+    private static func defaultMakeService(_ domain: String, _ type: String, _ name: String, _ port: Int32?) -> NetService {
+        if let port = port {
+            return NetService(domain: domain, type: type, name: name, port: port)
+        }
+        return NetService(domain: domain, type: type, name: name)
+    }
 
     // MARK: - Advertising
 
@@ -42,6 +55,14 @@ public class MDNS: NSObject {
     /// Timers: hard timeout and short settle debounce.
     private var hardTimeout: DispatchWorkItem?
     private var settleDebounce: DispatchWorkItem?
+
+    deinit {
+        publishTimeout?.cancel()
+        publisher?.stop()
+        publisher?.delegate = nil
+        cancelTimers()
+        stopBrowsers()
+    }
 
     // MARK: - Public API (thread-safe)
 
@@ -75,7 +96,7 @@ public class MDNS: NSObject {
             self.stopPublisherIfNeeded(reason: "Replaced by a new broadcast request")
             self.publishCompletion = completion
 
-            let svc = NetService(domain: "local.", type: type, name: name, port: Int32(port))
+            let svc = self.makeService("local.", type, name, Int32(port))
             svc.includesPeerToPeer = true
 
             if let txt = txt {
@@ -149,7 +170,7 @@ public class MDNS: NSObject {
             }
             #endif
             // Fallback: NetServiceBrowser
-            let b = NetServiceBrowser()
+            let b = self.makeBrowser()
             b.includesPeerToPeer = true
             b.delegate = self
             self.nsBrowser = b
@@ -178,6 +199,16 @@ public class MDNS: NSObject {
                 DispatchQueue.main.async { [weak self] in
                     self?.finishDiscovery(session: session, error: err)
                 }
+            case .waiting(let err):
+                // Denied Local Network permission parks the browser in `.waiting` forever; surface it.
+                if Self.isLocalNetworkDenied(err) {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.finishDiscovery(
+                            session: session,
+                            error: Self.error("Local network access denied. Enable it in Settings > Privacy > Local Network.")
+                        )
+                    }
+                }
             default:
                 break
             }
@@ -188,25 +219,7 @@ public class MDNS: NSObject {
             guard session == self.discoverySession, self.discoverCompletion != nil else { return }
             for r in results {
                 guard case let NWEndpoint.service(name: n, type: t, domain: d, interface: _) = r.endpoint else { continue }
-                if !self.matchesTarget(n) { continue }
-
-                // Use NetService for resolve (port/hosts/TXT) to keep output parity with fallback.
-                let key = self.keyFor(name: n, type: t, domain: d)
-                if self.discovered.contains(where: { $0.identityKey == key }) { continue }
-
-                let resolver = NetService(domain: d.isEmpty ? "local." : d,
-                                          type: t.hasSuffix(".") ? t : t + ".",
-                                          name: n)
-                resolver.includesPeerToPeer = true
-                resolver.delegate = self
-
-                let box = ServiceBox(name: n, type: resolver.type, domain: resolver.domain)
-                self.discovered.append(box)
-                self.resolveMap[resolver] = box
-                resolver.resolve(withTimeout: 5.0)
-
-                // Reschedule short settle window on each new find.
-                self.scheduleSettleDebounce(session: session)
+                self.handleServiceFound(name: n, type: t, domain: d)
             }
         }
 
@@ -265,13 +278,17 @@ public class MDNS: NSObject {
         settleDebounce?.cancel(); settleDebounce = nil
     }
 
-    /// Schedule a short debounce to finish discovery when the system becomes idle.
-    private func scheduleSettleDebounce(session: UInt64? = nil, _ ms: Int = 350) {
+    /// Schedule a short debounce to finish discovery once nothing is left to resolve.
+    /// While any resolver is outstanding this does nothing: finishing early would drop services
+    /// whose resolve simply takes longer than the debounce window.
+    private func settleIfIdle(session: UInt64? = nil) {
         settleDebounce?.cancel()
+        settleDebounce = nil
+        guard resolveMap.isEmpty, discoverCompletion != nil else { return }
         let session = session ?? discoverySession
         let wi = DispatchWorkItem { [weak self] in self?.finishDiscovery(session: session) }
         settleDebounce = wi
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms), execute: wi)
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(settleDebounceMs), execute: wi)
     }
 
     /// Stop any active browsers.
@@ -309,10 +326,10 @@ public class MDNS: NSObject {
         publishTimeout?.cancel()
         let wi = DispatchWorkItem { [weak self] in
             guard let self = self, session == self.publishSession, self.publishCompletion != nil else { return }
-            self.stopPublisherIfNeeded(reason: "Timed out waiting for service publish after \(Self.publishTimeoutMs)ms")
+            self.stopPublisherIfNeeded(reason: "Timed out waiting for service publish after \(self.publishTimeoutMs)ms")
         }
         publishTimeout = wi
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(Self.publishTimeoutMs), execute: wi)
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(publishTimeoutMs), execute: wi)
     }
 
     /// Normalize a service name by removing the system-appended `" (n)"` suffix.
@@ -339,6 +356,47 @@ public class MDNS: NSObject {
 
     private static func error(_ message: String) -> NSError {
         return NSError(domain: "mDNS", code: -1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+extension MDNS {
+    #if canImport(Network)
+    /// `NWBrowser` parks in `.waiting(.dns(PolicyDenied))` when the Local Network permission is denied.
+    @available(iOS 12.0, *)
+    static func isLocalNetworkDenied(_ error: NWError) -> Bool {
+        if case .dns(let code) = error { return code == -65570 } // kDNSServiceErr_PolicyDenied
+        return false
+    }
+    #endif
+
+    // MARK: - Internal: candidate handling (shared by NWBrowser and NetServiceBrowser)
+
+    /// Register one browse result and start resolving it.
+    ///
+    /// The identity key is built from the *normalized* type/domain, the same values `ServiceBox`
+    /// stores. `NWBrowser` re-delivers its whole result set on every change, so a key built from the
+    /// raw values would never match and every change would spawn a new resolver per known service.
+    internal func handleServiceFound(name: String, type: String, domain: String) {
+        guard discoverCompletion != nil, matchesTarget(name) else { return }
+
+        let normType = type.hasSuffix(".") ? type : type + "."
+        let normDomain = domain.isEmpty ? "local." : (domain.hasSuffix(".") ? domain : domain + ".")
+        let key = keyFor(name: name, type: normType, domain: normDomain)
+        if discovered.contains(where: { $0.identityKey == key }) { return }
+
+        // Dedicated resolver (never reuse the browser's service object).
+        let resolver = makeService(normDomain, normType, name, nil)
+        resolver.includesPeerToPeer = true
+        resolver.delegate = self
+
+        let box = ServiceBox(name: name, type: normType, domain: normDomain)
+        discovered.append(box)
+        resolveMap[resolver] = box
+        resolver.resolve(withTimeout: resolveTimeoutSeconds)
+
+        // A resolver is now pending: never settle (finish early) while it is outstanding.
+        settleDebounce?.cancel()
+        settleDebounce = nil
     }
 }
 
@@ -385,19 +443,25 @@ extension MDNS: NetServiceDelegate {
         }
         box.resolved = true
 
+        // This resolver is done.
+        resolveMap.removeValue(forKey: sender)
+        sender.stop()
+        sender.delegate = nil
+
         // Early finish if a specific target is requested and this service matches it.
         if let t = targetName, !t.isEmpty, matchesTarget(sender.name) {
             finishDiscovery(session: discoverySession)
         } else {
-            // Otherwise, allow a brief settle window to collect late peers.
-            scheduleSettleDebounce(session: discoverySession)
+            // Otherwise, allow a brief settle window to collect late peers (only once all resolves are done).
+            settleIfIdle(session: discoverySession)
         }
     }
 
     public func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
         // Drop the unresolved service and try to continue with others.
-        resolveMap.removeValue(forKey: sender)
-        scheduleSettleDebounce(session: discoverySession)
+        guard resolveMap.removeValue(forKey: sender) != nil else { return }
+        sender.delegate = nil
+        settleIfIdle(session: discoverySession)
     }
 }
 
@@ -406,26 +470,9 @@ extension MDNS: NetServiceDelegate {
 extension MDNS: NetServiceBrowserDelegate {
 
     public func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
-        // Early filter by instance name.
-        guard matchesTarget(service.name) else { return }
-
-        let key = keyFor(name: service.name, type: service.type, domain: service.domain)
-        if discovered.contains(where: { $0.identityKey == key }) { return }
-
-        // Create a dedicated resolver (do not reuse `service` directly).
-        let resolver = NetService(domain: service.domain, type: service.type, name: service.name)
-        resolver.includesPeerToPeer = true
-        resolver.delegate = self
-
-        // Track box + resolver pair.
-        let box = ServiceBox(name: service.name, type: service.type, domain: service.domain)
-        resolveMap[resolver] = box
-        discovered.append(box)
-
-        resolver.resolve(withTimeout: 5.0)
-
-        // If this wave ends soon, schedule settle debounce; else wait for more.
-        if !moreComing { scheduleSettleDebounce(session: discoverySession) }
+        handleServiceFound(name: service.name, type: service.type, domain: service.domain)
+        // With nothing outstanding (e.g. the candidate was filtered out) let the system settle.
+        if !moreComing { settleIfIdle(session: discoverySession) }
     }
 
     public func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
@@ -473,7 +520,7 @@ private final class ServiceBox: Hashable {
 // MARK: - Address utilities
 
 /// Convert `NetService.addresses` to numeric IPv4/IPv6 strings.
-private func parseHosts(_ addrs: [Data]?) -> [String] {
+func parseHosts(_ addrs: [Data]?) -> [String] {
     guard let addrs = addrs, !addrs.isEmpty else { return [] }
     var out: [String] = []
     out.reserveCapacity(addrs.count)
