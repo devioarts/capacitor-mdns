@@ -55,7 +55,7 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
         let type = normalizeType(call.getString("type"))
         let name = (call.getString("name")?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? "DevIOArtsMDNS"
         let port = call.getInt("port") ?? 0
-        let txt  = call.getObject("txt") as? [String: String]
+        let txt  = call.getObject("txt")?.compactMapValues { $0 as? String }
 
         guard (1...65535).contains(port) else {
             call.resolve([
