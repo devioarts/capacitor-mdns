@@ -104,7 +104,13 @@
     "typescript": "^6.0.0"
   },
   "peerDependencies": {
-    "@capacitor/core": ">=8.0.0"
+    "@capacitor/core": ">=8.0.0",
+    "bonjour-service": "^1.4.0"
+  },
+  "peerDependenciesMeta": {
+    "bonjour-service": {
+      "optional": true
+    }
   },
   "prettier": "@ionic/prettier-config",
   "capacitor": {

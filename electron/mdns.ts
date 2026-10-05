@@ -14,6 +14,20 @@ import type {
 type Service = InstanceType<typeof Bonjour.Service>;
 type Browser = InstanceType<typeof Bonjour.Browser>;
 
+/** The subset of `bonjour-service` this class uses; injectable so tests can fake the network. */
+export type BonjourLike = Pick<Bonjour, 'publish' | 'find' | 'destroy'>;
+
+export interface MdnsOptions {
+  /** Max time to wait for a publish to come up (default 5000). */
+  publishTimeoutMs?: number;
+  /** Max time to wait for a service to stop (default 3000). */
+  stopTimeoutMs?: number;
+}
+
+const DEFAULT_DISCOVER_TIMEOUT_MS = 3000;
+/** `setTimeout` treats delays above 2^31-1 as 1ms, so clamp. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 /**
  * Electron main-process implementation of the mDNS/Bonjour functionality.
  *
@@ -27,10 +41,20 @@ type Browser = InstanceType<typeof Bonjour.Browser>;
  * - TXT records are forwarded as strings when present.
  */
 export class mDNS {
-  private readonly publishTimeoutMs = 5000;
-  private readonly stopTimeoutMs = 3000;
+  private readonly publishTimeoutMs: number;
+  private readonly stopTimeoutMs: number;
   private broadcastQueue: Promise<unknown> = Promise.resolve();
   private destroyed = false;
+  /** Settle callbacks of in-flight discoveries, so destroy() can end them instead of leaving them waiting. */
+  private readonly activeDiscoveries = new Set<(abortMessage?: string) => void>();
+
+  constructor(
+    private readonly bonjour: BonjourLike = new Bonjour(),
+    options: MdnsOptions = {},
+  ) {
+    this.publishTimeoutMs = options.publishTimeoutMs ?? 5000;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? 3000;
+  }
 
   //<editor-fold desc="Init/Destroy">
   private ipcRegistered = false;
@@ -71,6 +95,7 @@ export class mDNS {
   async destroy(): Promise<void> {
     this.destroyed = true;
     this.unregisterIpc();
+    for (const abort of [...this.activeDiscoveries]) abort('mDNS instance destroyed during discovery');
     await this.withBroadcastLock(async () => {
       await this.stopBroadcastUnlocked();
       try {
@@ -83,7 +108,6 @@ export class mDNS {
 
   //</editor-fold>
 
-  private bonjour = new Bonjour();
   private advertiser?: Service;
 
   // ----------------------------- utils -----------------------------
@@ -114,12 +138,21 @@ export class mDNS {
       t = this.normalize(target);
     return c === t || c.startsWith(t);
   }
-  private parseType(typeWithDot?: unknown): { type: string; protocol: 'tcp' | 'udp' } {
+  /**
+   * Parse a `_name._tcp.` style type. Absent/blank input means the default `_http._tcp.`;
+   * anything malformed is rejected (null) rather than silently advertised as something else.
+   */
+  private parseType(typeWithDot?: unknown): { type: string; protocol: 'tcp' | 'udp' } | null {
     const raw = typeof typeWithDot === 'string' && typeWithDot.trim() ? typeWithDot.trim() : '_http._tcp.';
-    const s = raw.replace(/\.$/, '');
-    const m = /^_([^.]+)\._(tcp|udp)$/.exec(s);
-    if (!m) return { type: 'http', protocol: 'tcp' };
-    return { type: m[1], protocol: m[2] as 'tcp' | 'udp' };
+    const m = /^_([^.]+)\._(tcp|udp)$/.exec(raw.replace(/\.$/, ''));
+    return m ? { type: m[1], protocol: m[2] as 'tcp' | 'udp' } : null;
+  }
+  private invalidTypeMessage(typeWithDot: unknown): string {
+    return `Invalid service type: ${String(typeWithDot)} (expected e.g. "_http._tcp.")`;
+  }
+  private normalizeTimeout(value: unknown): number {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_DISCOVER_TIMEOUT_MS;
+    return Math.min(Math.max(0, value), MAX_TIMER_MS);
   }
   private toFullType(type: string, protocol: 'tcp' | 'udp'): string {
     return `_${type}._${protocol}.`;
@@ -181,9 +214,19 @@ export class mDNS {
       if (this.destroyed)
         return { publishing: false, name: '', error: true, errorMessage: 'mDNS instance is destroyed' };
 
+      const parsed = this.parseType(safeOptions.type);
+      if (!parsed) {
+        return {
+          publishing: false,
+          name: '',
+          error: true,
+          errorMessage: this.invalidTypeMessage(safeOptions.type),
+        };
+      }
+      const { type, protocol } = parsed;
+
       await this.stopBroadcastUnlocked();
 
-      const { type, protocol } = this.parseType(safeOptions.type);
       return new Promise<MdnsBroadcastResult>((resolve) => {
         let settled = false;
         let timeout: NodeJS.Timeout | null = null;
@@ -283,9 +326,18 @@ export class mDNS {
       return { error: true, errorMessage: 'mDNS instance is destroyed', servicesFound: 0, services: [] };
     }
 
-    const { type, protocol } = this.parseType(safeOptions.type);
+    const parsed = this.parseType(safeOptions.type);
+    if (!parsed) {
+      return {
+        error: true,
+        errorMessage: this.invalidTypeMessage(safeOptions.type),
+        servicesFound: 0,
+        services: [],
+      };
+    }
+    const { type, protocol } = parsed;
     const targetId = typeof safeOptions.name === 'string' && safeOptions.name ? safeOptions.name : null;
-    const timeoutMs = typeof safeOptions.timeout === 'number' ? safeOptions.timeout : 3000;
+    const timeoutMs = this.normalizeTimeout(safeOptions.timeout);
 
     let browser: Browser | null = null;
     const services: MdnsService[] = [];
@@ -296,9 +348,14 @@ export class mDNS {
       let timer: NodeJS.Timeout | null = null;
       let settled = false;
 
-      const finish = () => {
+      const finish = (abortMessage?: string) => {
         if (settled) return;
         settled = true;
+        this.activeDiscoveries.delete(finish);
+        if (abortMessage) {
+          hadError = true;
+          errMsg = abortMessage;
+        }
         if (browser) {
           this.safeStopBrowser(browser);
           browser = null;
@@ -315,8 +372,10 @@ export class mDNS {
         });
       };
 
+      this.activeDiscoveries.add(finish);
       try {
         browser = this.bonjour.find({ type, protocol }, (s) => {
+          if (settled) return; // a late event must not mutate an already returned result
           if (!this.matchesTarget(s.name || '', targetId)) return;
           const item: MdnsService = {
             name: s.name || '',
@@ -338,7 +397,7 @@ export class mDNS {
         };
         (browser as any).on('error', onBrowserError);
 
-        timer = setTimeout(finish, Math.max(0, timeoutMs));
+        timer = setTimeout(() => finish(), timeoutMs);
       } catch (err) {
         hadError = true;
         errMsg = this.toErr(err);

@@ -31,10 +31,11 @@ import { mDNS } from '@devioarts/capacitor-mdns/electron';
 The older manual bridge remains available for apps that do not use
 `devioarts/capacitor-electron`.
 
-Install the runtime Bonjour dependency in the Electron app:
+The Electron runtime needs `bonjour-service`. It is declared as an optional peer dependency
+(only Electron apps need it), so install it in the Electron app:
 
 ```shell
-npm i bonjour-service@1.4.0
+npm i bonjour-service@^1.4.0
 ```
 
 ### Main process
