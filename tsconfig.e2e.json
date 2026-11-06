@@ -13,5 +13,5 @@
     "target": "es2022",
     "types": ["node"]
   },
-  "include": ["electron/mdns.ts", "src/definitions.ts"]
+  "include": ["electron/mdns.ts", "electron/src/plugin-settings.ts", "src/definitions.ts", "src/web.ts"]
 }

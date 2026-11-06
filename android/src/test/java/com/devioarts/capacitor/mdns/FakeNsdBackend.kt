@@ -1,6 +1,7 @@
 package com.devioarts.capacitor.mdns
 
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -22,14 +23,36 @@ internal class FakeNsdBackend(override val supportsConcurrentResolve: Boolean) :
     val registeredNames = CopyOnWriteArrayList<String>()
     val unregisterCalls = AtomicInteger()
     @Volatile var registerError: Throwable? = null
+    @Volatile var unregisterError: Throwable? = null
+    @Volatile var unregistrationErrorCode: Int? = null
+    @Volatile var autoUnregister = true
+    val multicastLocks = AtomicInteger()
+    val lockAcquires = AtomicInteger()
+    val lockReleases = AtomicInteger()
+
+    override fun acquireMulticastLock() {
+        lockAcquires.incrementAndGet()
+        multicastLocks.incrementAndGet()
+    }
+
+    override fun releaseMulticastLock() {
+        lockReleases.incrementAndGet()
+        check(multicastLocks.decrementAndGet() >= 0) { "Multicast lock released twice" }
+    }
 
     // Discovery
     @Volatile var discoveryListener: NsdBackend.DiscoveryListener? = null
     val stopDiscoveryCalls = AtomicInteger()
     @Volatile var startDiscoveryError: Throwable? = null
+    @Volatile var stopDiscoveryError: Throwable? = null
+    @Volatile var stopDiscoveryErrorCode: Int? = null
+    @Volatile var autoStopDiscovery = true
+    @Volatile var stopDiscoveryDelayMs = 0L
+    val discoveryListeners = ConcurrentHashMap<String, NsdBackend.DiscoveryListener>()
 
     // Resolve
     val resolveCalls = CopyOnWriteArrayList<String>()
+    val resolveListeners = CopyOnWriteArrayList<NsdBackend.ResolveListener>()
     val cancelResolveCalls = AtomicInteger()
     val alreadyActiveFailures = AtomicInteger()
     val maxConcurrentResolves = AtomicInteger()
@@ -49,11 +72,17 @@ internal class FakeNsdBackend(override val supportsConcurrentResolve: Boolean) :
         registerError?.let { throw it }
         registrationListener = listener
         registeredNames += name
-        return Any()
+        return listener
     }
 
     override fun unregisterService(token: Any) {
         unregisterCalls.incrementAndGet()
+        unregisterError?.let { throw it }
+        if (autoUnregister) background {
+            val listener = token as NsdBackend.RegistrationListener
+            val code = unregistrationErrorCode
+            if (code == null) listener.onUnregistered() else listener.onUnregistrationFailed(code)
+        }
     }
 
     // ---- Discovery -----------------------------------------------------------
@@ -61,17 +90,30 @@ internal class FakeNsdBackend(override val supportsConcurrentResolve: Boolean) :
     override fun startDiscovery(type: String, listener: NsdBackend.DiscoveryListener): Any {
         startDiscoveryError?.let { throw it }
         discoveryListener = listener
-        return Any()
+        discoveryListeners[type] = listener
+        return listener
     }
 
     override fun stopDiscovery(token: Any) {
         stopDiscoveryCalls.incrementAndGet()
+        stopDiscoveryError?.let { throw it }
+        if (autoStopDiscovery) background {
+            Thread.sleep(stopDiscoveryDelayMs)
+            val listener = token as NsdBackend.DiscoveryListener
+            val error = stopDiscoveryErrorCode
+            if (error != null) listener.onStopFailed(error)
+            else {
+                discoveryListeners.entries.removeIf { it.value === token }
+                listener.onStopped()
+            }
+        }
     }
 
     // ---- Resolve -------------------------------------------------------------
 
     override fun resolve(service: DiscoveredService, listener: NsdBackend.ResolveListener): Any? {
         resolveCalls += service.name
+        resolveListeners += listener
 
         if (!supportsConcurrentResolve) {
             val forced = forcedAlreadyActive.getAndUpdate { if (it > 0) it - 1 else 0 } > 0

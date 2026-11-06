@@ -195,6 +195,57 @@ test('txt values are forwarded as strings and the name is trimmed', async () => 
   }
 });
 
+test('failed stops report errors, retain the service and block replacement until a retry succeeds', async () => {
+  for (const mode of ['throw', 'callback', 'timeout']) {
+    const fake = fakeBonjour();
+    const mdns = new mDNS(fake, { stopTimeoutMs: 20 });
+    try {
+      await mdns.startBroadcast({ name: 'A', port: 80 });
+      const svc = fake.published[0];
+      const originalStop = svc.stop;
+      svc.stop = (cb) => {
+        if (mode === 'throw') throw new Error('stop failed');
+        if (mode === 'callback') setImmediate(() => cb(new Error('stop failed')));
+      };
+      const stopped = await mdns.stopBroadcast();
+      assert.equal(stopped.error, true, mode);
+      assert.equal(stopped.publishing, true, mode);
+      assert.match(stopped.errorMessage, mode === 'timeout' ? /Timed out/ : /stop failed/);
+      const replacement = await mdns.startBroadcast({ name: 'B', port: 81 });
+      assert.equal(replacement.error, true);
+      assert.equal(replacement.publishing, true);
+      assert.equal(fake.published.length, 1, 'must retain the old service instead of publishing another');
+      svc.stop = originalStop;
+      assert.equal((await mdns.stopBroadcast()).error, false);
+      assert.equal(svc.stopCalls, 1, 'the old service must still be available for cleanup');
+      assert.equal((await mdns.stopBroadcast()).publishing, false);
+    } finally {
+      await mdns.destroy();
+    }
+  }
+});
+
+test('publish timeout retains a service whose cleanup fails and does not race a replacement', async () => {
+  const fake = fakeBonjour({ publish: 'hang' });
+  const mdns = new mDNS(fake, { publishTimeoutMs: 15, stopTimeoutMs: 40 });
+  try {
+    const pending = mdns.startBroadcast({ name: 'A', port: 80 });
+    await sleep(5);
+    const svc = fake.published[0];
+    const originalStop = svc.stop;
+    svc.stop = () => { svc.stopCalls += 1; };
+    const result = await pending;
+    assert.equal(result.error, true);
+    assert.equal(result.publishing, true);
+    assert.match(result.errorMessage, /publish.*;.*stop/);
+    assert.equal(svc.stopCalls, 1, 'the publish timer must not trigger cleanup twice');
+    svc.stop = originalStop;
+    assert.equal((await mdns.stopBroadcast()).error, false);
+  } finally {
+    await mdns.destroy();
+  }
+});
+
 // ---- discover -----------------------------------------------------------------------------
 
 test('discover without a target collects, de-duplicates and normalizes services', async () => {

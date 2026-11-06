@@ -1,5 +1,6 @@
 // src/web.ts
 import { WebPlugin } from '@capacitor/core';
+import type { PluginListenerHandle } from '@capacitor/core';
 
 import type {
   mDNSPlugin,
@@ -9,6 +10,9 @@ import type {
   MdnsStopResult,
   MdnsDiscoverResult,
   MdnsPluginPlatformResult,
+  MdnsWatchOptions,
+  MdnsWatchResult,
+  MdnsWatchStopResult,
 } from './definitions';
 
 /**
@@ -30,6 +34,10 @@ export class mDNSWeb extends WebPlugin implements mDNSPlugin {
         stopBroadcast(): Promise<MdnsStopResult>;
         discover(o?: MdnsDiscoverOptions): Promise<MdnsDiscoverResult>;
         getPluginPlatform?(): Promise<MdnsPluginPlatformResult>;
+        watchServices?(options: MdnsWatchOptions): Promise<MdnsWatchResult>;
+        stopWatching?(): Promise<MdnsWatchStopResult>;
+        addListener?(eventName: string, handler: (data: any) => void): Promise<PluginListenerHandle>;
+        removeAllListeners?(): Promise<void>;
       } {
     if (typeof window === 'undefined') return undefined;
     return (window as any).mDNS || (window as any).mdns;
@@ -60,5 +68,25 @@ export class mDNSWeb extends WebPlugin implements mDNSPlugin {
     if (api?.discover) return api.discover(options);
     console.log('[WEB_NOT_SUPPORTED] discover', options);
     return { services: [], error: true, errorMessage: this.unsupportedMessage, servicesFound: 0 };
+  }
+
+  async watchServices(options: MdnsWatchOptions): Promise<MdnsWatchResult> {
+    if (this.electronApi?.watchServices) return this.electronApi.watchServices(options);
+    return { error: true, errorMessage: this.unsupportedMessage, watchersStarted: 0 };
+  }
+
+  async stopWatching(): Promise<MdnsWatchStopResult> {
+    if (this.electronApi?.stopWatching) return this.electronApi.stopWatching();
+    return { watching: false, error: false, errorMessage: null };
+  }
+
+  async addListener(eventName: string, handler: (data: any) => void): Promise<PluginListenerHandle> {
+    if (this.electronApi?.addListener) return this.electronApi.addListener(eventName, handler);
+    return super.addListener(eventName, handler);
+  }
+
+  async removeAllListeners(): Promise<void> {
+    await this.electronApi?.removeAllListeners?.();
+    await super.removeAllListeners();
   }
 }

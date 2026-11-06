@@ -7,13 +7,16 @@ package com.devioarts.capacitor.mdns
  * Contract:
  * - Listener callbacks MAY be invoked from any thread (the real NSD service uses its own thread for
  *   the legacy overloads). The consumer ([mDNS]) is responsible for hopping to its main thread.
- * - Methods may throw; the consumer treats failures as best-effort.
+ * - Methods may throw; registration/stop failures must reach the caller.
  * - Returned tokens are opaque and only meaningful when handed back to the same backend.
  */
 internal interface NsdBackend {
 
     /** True when several resolves can be in flight at once (API 34+ `ServiceInfoCallback`). */
     val supportsConcurrentResolve: Boolean
+
+    fun acquireMulticastLock()
+    fun releaseMulticastLock()
 
     fun registerService(type: String, name: String, port: Int, listener: RegistrationListener): Any
     fun unregisterService(token: Any)
@@ -28,11 +31,16 @@ internal interface NsdBackend {
     interface RegistrationListener {
         fun onRegistered(publishedName: String)
         fun onFailed(errorCode: Int)
+        fun onUnregistered()
+        fun onUnregistrationFailed(errorCode: Int)
     }
 
     interface DiscoveryListener {
         fun onStartFailed(errorCode: Int)
         fun onFound(service: DiscoveredService)
+        fun onLost(service: DiscoveredService) {}
+        fun onStopFailed(errorCode: Int) {}
+        fun onStopped() {}
     }
 
     interface ResolveListener {

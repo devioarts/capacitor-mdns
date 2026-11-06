@@ -28,6 +28,10 @@ import { mDNS } from '@devioarts/capacitor-mdns/electron';
 
 ## Manual bridge
 
+Continuous discovery uses the same `watchServices`, `stopWatching` and `addListener` API as native
+platforms. After updating the plugin, run `npx cap-electron sync` so the generated metadata includes
+the new methods and the `serviceFound`, `serviceLost`, `watchError` events.
+
 The older manual bridge remains available for apps that do not use
 `devioarts/capacitor-electron`.
 

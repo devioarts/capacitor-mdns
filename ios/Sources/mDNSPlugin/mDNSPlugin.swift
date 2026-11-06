@@ -23,10 +23,17 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getPluginPlatform", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "startBroadcast", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopBroadcast", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "discover", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "discover", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "watchServices", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stopWatching", returnType: CAPPluginReturnPromise)
     ]
 
     private let mdns = MDNS()
+
+    override public func load() {
+        super.load()
+        mdns.watchDelegate = self
+    }
 
     // MARK: - Helpers
 
@@ -130,5 +137,36 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
                 ])
             }
         }
+    }
+
+    @objc public func watchServices(_ call: CAPPluginCall) {
+        guard let types = call.getArray("types", String.self), !types.isEmpty else {
+            call.resolve(["error": true, "errorMessage": "Expected a nonempty array of service types", "watchersStarted": 0])
+            return
+        }
+        mdns.watchServices(types: types) { result in
+            switch result {
+            case .success(let count): call.resolve(["error": false, "errorMessage": NSNull(), "watchersStarted": count])
+            case .failure(let error): call.resolve(["error": true, "errorMessage": error.localizedDescription, "watchersStarted": 0])
+            }
+        }
+    }
+
+    @objc public func stopWatching(_ call: CAPPluginCall) {
+        mdns.stopWatching {
+            call.resolve(["watching": false, "error": false, "errorMessage": NSNull()])
+        }
+    }
+}
+
+extension mDNSPlugin: MDNSWatchDelegate {
+    public func mdns(_ mdns: MDNS, didFindService service: [String: Any]) {
+        notifyListeners("serviceFound", data: ["service": service])
+    }
+    public func mdns(_ mdns: MDNS, didLoseService service: [String: Any]) {
+        notifyListeners("serviceLost", data: ["service": service])
+    }
+    public func mdns(_ mdns: MDNS, watchError type: String, message: String, watching: Bool) {
+        notifyListeners("watchError", data: ["type": type, "errorMessage": message, "watching": watching])
     }
 }

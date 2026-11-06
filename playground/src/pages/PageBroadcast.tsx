@@ -16,8 +16,9 @@ export const PageBroadcast: React.FC = () => {
     log.info("server", "Starting broadcast");
     try {
       const res = await mDNS.startBroadcast({ type, name: serviceId, port });
-      log.info("server", "Broadcast started", res);
-      setActive(true);
+      if (res.error) log.error("server", "Broadcast failed", res);
+      else log.info("server", "Broadcast started", res);
+      setActive(res.publishing);
     } catch (e) {
       log.error("server", "Broadcast failed", e);
     }
@@ -27,8 +28,9 @@ export const PageBroadcast: React.FC = () => {
     log.info("server", "Stopping broadcast");
     try {
       const res = await mDNS.stopBroadcast();
-      log.info("server", "Broadcast stopped", res);
-      setActive(false);
+      if (res.error) log.error("server", "Broadcast stop failed", res);
+      else log.info("server", "Broadcast stopped", res);
+      setActive(res.publishing);
     } catch (e) {
       log.error("server", "Broadcast failed", e);
     }

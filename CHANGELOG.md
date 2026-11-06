@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Continuous multi-type discovery on iOS, Android and Electron through `watchServices()` and
+  `stopWatching()`, with `serviceFound`, `serviceLost` and `watchError` listeners. Valid replacement
+  calls stop previous watchers; stopping leaves advertisements and one-shot discovery independent.
+  Thanks to [Idrimi](https://github.com/Idrimi) for the original feature in
+  [PR #7](https://github.com/devioarts/capacitor-mdns/pull/7).
+- Full found/lost snapshots, duplicate-type normalization, stale-callback guards, native resolve
+  retries, shared Android resolver scheduling and multicast locks, and Electron TTL expiry / IPC events.
+- Resolved Android NSD TXT attributes, optional service hostnames, a playground watch control and
+  regression tests for watcher lifecycle and both Electron integration routes.
+
 ### Fixed
 
 - Android: NSD callbacks (delivered on NsdManager's internal thread) are now marshalled to the main thread before touching any state, removing data races between discovery results, the timeout, and publish completion. A publish confirmation racing the publish timeout can no longer complete the call twice.

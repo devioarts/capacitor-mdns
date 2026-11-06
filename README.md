@@ -26,7 +26,38 @@ const result = await mDNS.discover({ type: '_http._tcp.', timeout: 3000 });
 await mDNS.stopBroadcast();
 ```
 
+## Continuous discovery
+
+Thank you, [Idrimi](https://github.com/Idrimi), for contributing the original continuous discovery
+feature in [PR #7](https://github.com/devioarts/capacitor-mdns/pull/7).
+
+`watchServices()` monitors multiple service types on iOS, Android and Electron until stopped.
+Register listeners before starting; a new valid call replaces the previous watch.
+
+```ts
+const found = await mDNS.addListener('serviceFound', ({ service }) => {
+  console.log('Found', service.name, service.hosts, service.port);
+});
+const lost = await mDNS.addListener('serviceLost', ({ service }) => {
+  console.log('Lost', service.name, service.hosts, service.port);
+});
+const errors = await mDNS.addListener('watchError', (event) => {
+  console.error(event.type, event.errorMessage, event.watching);
+});
+
+await mDNS.watchServices({ types: ['_http._tcp.', '_ipp._tcp.'] });
+// Later, including when leaving the screen:
+await mDNS.stopWatching();
+await Promise.all([found.remove(), lost.remove(), errors.remove()]);
+```
+
+Found/lost events contain the full service snapshot; `hosts` is always an array. A service
+that disappears before resolving emits neither event. Browser errors stop watching and emit
+`watchError` with `watching: false`; exhausted resolution retries emit it with `watching: true`.
+`stopWatching()` leaves broadcasting and one-shot discovery running. Browsers do not support mDNS.
+
 ## Platform Setup
+
 
 Android requires mDNS/network permissions in `AndroidManifest.xml`; the plugin also declares them
 so they are merged during sync. iOS requires local network keys in `Info.plist`.
@@ -48,6 +79,11 @@ Detailed setup lives in:
 * [`startBroadcast(...)`](#startbroadcast)
 * [`stopBroadcast()`](#stopbroadcast)
 * [`discover(...)`](#discover)
+* [`watchServices(...)`](#watchservices)
+* [`stopWatching()`](#stopwatching)
+* [`addListener('serviceFound' | 'serviceLost', ...)`](#addlistenerservicefound--servicelost-)
+* [`addListener('watchError', ...)`](#addlistenerwatcherror-)
+* [`removeAllListeners()`](#removealllisteners)
 * [Interfaces](#interfaces)
 * [Type Aliases](#type-aliases)
 
@@ -118,6 +154,81 @@ Discover services of a given type and optionally filter by instance name.
 --------------------
 
 
+### watchServices(...)
+
+```typescript
+watchServices(options: MdnsWatchOptions) => Promise<MdnsWatchResult>
+```
+
+Continuously watch several service types. A valid call replaces the previous watch.
+Register listeners before starting. Each resolved service emits `serviceFound` once;
+disappearance emits `serviceLost` with its last snapshot. No loss is emitted for an
+unresolved service. Watching and one-shot discovery can run together.
+Thanks to Idrimi for contributing the original continuous discovery feature (PR #7).
+
+| Param         | Type                                                          |
+| ------------- | ------------------------------------------------------------- |
+| **`options`** | <code><a href="#mdnswatchoptions">MdnsWatchOptions</a></code> |
+
+**Returns:** <code>Promise&lt;<a href="#mdnswatchresult">MdnsWatchResult</a>&gt;</code>
+
+--------------------
+
+
+### stopWatching()
+
+```typescript
+stopWatching() => Promise<MdnsWatchStopResult>
+```
+
+Stop all watchers. No events from that watch are emitted after this resolves.
+
+**Returns:** <code>Promise&lt;<a href="#mdnswatchstopresult">MdnsWatchStopResult</a>&gt;</code>
+
+--------------------
+
+
+### addListener('serviceFound' | 'serviceLost', ...)
+
+```typescript
+addListener(eventName: 'serviceFound' | 'serviceLost', handler: (event: MdnsServiceEvent) => void) => Promise<PluginListenerHandle>
+```
+
+| Param           | Type                                                                              |
+| --------------- | --------------------------------------------------------------------------------- |
+| **`eventName`** | <code>'serviceFound' \| 'serviceLost'</code>                                      |
+| **`handler`**   | <code>(event: <a href="#mdnsserviceevent">MdnsServiceEvent</a>) =&gt; void</code> |
+
+**Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
+
+--------------------
+
+
+### addListener('watchError', ...)
+
+```typescript
+addListener(eventName: 'watchError', handler: (event: MdnsWatchErrorEvent) => void) => Promise<PluginListenerHandle>
+```
+
+| Param           | Type                                                                                    |
+| --------------- | --------------------------------------------------------------------------------------- |
+| **`eventName`** | <code>'watchError'</code>                                                               |
+| **`handler`**   | <code>(event: <a href="#mdnswatcherrorevent">MdnsWatchErrorEvent</a>) =&gt; void</code> |
+
+**Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
+
+--------------------
+
+
+### removeAllListeners()
+
+```typescript
+removeAllListeners() => Promise<void>
+```
+
+--------------------
+
+
 ### Interfaces
 
 
@@ -137,12 +248,12 @@ Result of startBroadcast(). Indicates whether advertising is active
 and the final service name. On failure, `error` is true and `errorMessage`
 describes the issue.
 
-| Prop               | Type                        | Description                                                          |
-| ------------------ | --------------------------- | -------------------------------------------------------------------- |
-| **`error`**        | <code>boolean</code>        | True if the operation failed.                                        |
-| **`errorMessage`** | <code>string \| null</code> | Error description or null on success.                                |
-| **`name`**         | <code>string</code>         | Final (possibly uniquified) service instance name. Empty on failure. |
-| **`publishing`**   | <code>boolean</code>        | Whether the advertiser is currently active.                          |
+| Prop               | Type                        | Description                                                                   |
+| ------------------ | --------------------------- | ----------------------------------------------------------------------------- |
+| **`error`**        | <code>boolean</code>        | True if the operation failed.                                                 |
+| **`errorMessage`** | <code>string \| null</code> | Error description or null on success.                                         |
+| **`name`**         | <code>string</code>         | Final (possibly uniquified) service instance name. Empty on failure.          |
+| **`publishing`**   | <code>boolean</code>        | Whether an advertiser is active, or may still be active after failed cleanup. |
 
 
 #### MdnsBroadcastOptions
@@ -162,11 +273,11 @@ Options for starting a Bonjour/mDNS advertisement.
 Result of stopBroadcast(). Indicates whether the advertiser is active
 after the call (normally false) and includes error information.
 
-| Prop               | Type                        | Description                                                         |
-| ------------------ | --------------------------- | ------------------------------------------------------------------- |
-| **`error`**        | <code>boolean</code>        | True if an error occurred while stopping.                           |
-| **`errorMessage`** | <code>string \| null</code> | Error description or null on success.                               |
-| **`publishing`**   | <code>boolean</code>        | Whether the advertiser remains active (should be false on success). |
+| Prop               | Type                        | Description                                                                                   |
+| ------------------ | --------------------------- | --------------------------------------------------------------------------------------------- |
+| **`error`**        | <code>boolean</code>        | True if an error occurred while stopping.                                                     |
+| **`errorMessage`** | <code>string \| null</code> | Error description or null on success.                                                         |
+| **`publishing`**   | <code>boolean</code>        | False after confirmed stop; true when stopping failed and the advertiser may still be active. |
 
 
 #### MdnsDiscoverResult
@@ -186,14 +297,15 @@ Result of discover(). Contains normalized services and error information.
 Normalized description of a discovered Bonjour/mDNS service.
 Returned from {@link mDNSPlugin.discover}.
 
-| Prop         | Type                                        | Description                                                                               |
-| ------------ | ------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| **`name`**   | <code>string</code>                         | Instance name of the service (may be uniqued by the OS, e.g. "My App (2)").               |
-| **`type`**   | <code>string</code>                         | Full service type including the trailing dot, e.g. `"_http._tcp."`.                       |
-| **`domain`** | <code>string</code>                         | Service domain; typically `"local."`.                                                     |
-| **`port`**   | <code>number</code>                         | TCP port the service advertises.                                                          |
-| **`hosts`**  | <code>string[]</code>                       | Resolved numeric IP addresses (IPv4/IPv6).                                                |
-| **`txt`**    | <code><a href="#mdnstxt">MdnsTxt</a></code> | TXT dictionary (key → value). Usually present on iOS; Android NSD does not populate this. |
+| Prop           | Type                                        | Description                                                                 |
+| -------------- | ------------------------------------------- | --------------------------------------------------------------------------- |
+| **`name`**     | <code>string</code>                         | Instance name of the service (may be uniqued by the OS, e.g. "My App (2)"). |
+| **`type`**     | <code>string</code>                         | Full service type including the trailing dot, e.g. `"_http._tcp."`.         |
+| **`domain`**   | <code>string</code>                         | Service domain; typically `"local."`.                                       |
+| **`port`**     | <code>number</code>                         | Port the service advertises.                                                |
+| **`hosts`**    | <code>string[]</code>                       | Resolved numeric IP addresses (IPv4/IPv6).                                  |
+| **`hostname`** | <code>string</code>                         | Host name when supplied by the platform, e.g. `"my-device.local."`.         |
+| **`txt`**      | <code><a href="#mdnstxt">MdnsTxt</a></code> | TXT dictionary (key → value).                                               |
 
 
 #### MdnsDiscoverOptions
@@ -206,6 +318,64 @@ Options for Bonjour/mDNS discovery.
 | **`name`**    | <code>string</code>  | Optional instance name filter (prefix-safe).                     |
 | **`timeout`** | <code>number</code>  | Discovery timeout in milliseconds.                               |
 | **`useNW`**   | <code>boolean</code> | iOS-only hint to use `NWBrowser` instead of `NetServiceBrowser`. |
+
+
+#### MdnsWatchResult
+
+Native browsers have been requested; later failures are reported through `watchError`.
+
+| Prop                  | Type                        |
+| --------------------- | --------------------------- |
+| **`error`**           | <code>boolean</code>        |
+| **`errorMessage`**    | <code>string \| null</code> |
+| **`watchersStarted`** | <code>number</code>         |
+
+
+#### MdnsWatchOptions
+
+Options for continuous discovery on iOS, Android and Electron.
+
+| Prop        | Type                  | Description                                                                        |
+| ----------- | --------------------- | ---------------------------------------------------------------------------------- |
+| **`types`** | <code>string[]</code> | Nonempty list of service types. Trailing dots are optional; duplicates are merged. |
+
+
+#### MdnsWatchStopResult
+
+Stops watching independently of any active broadcast.
+
+| Prop               | Type                        |
+| ------------------ | --------------------------- |
+| **`error`**        | <code>boolean</code>        |
+| **`errorMessage`** | <code>string \| null</code> |
+| **`watching`**     | <code>boolean</code>        |
+
+
+#### PluginListenerHandle
+
+| Prop         | Type                                      |
+| ------------ | ----------------------------------------- |
+| **`remove`** | <code>() =&gt; Promise&lt;void&gt;</code> |
+
+
+#### MdnsServiceEvent
+
+Both found and lost events contain a complete service snapshot, including `hosts`.
+
+| Prop          | Type                                                |
+| ------------- | --------------------------------------------------- |
+| **`service`** | <code><a href="#mdnsservice">MdnsService</a></code> |
+
+
+#### MdnsWatchErrorEvent
+
+Browser failures stop the watch; exhausted service resolution retries leave it running.
+
+| Prop               | Type                 |
+| ------------------ | -------------------- |
+| **`type`**         | <code>string</code>  |
+| **`errorMessage`** | <code>string</code>  |
+| **`watching`**     | <code>boolean</code> |
 
 
 ### Type Aliases

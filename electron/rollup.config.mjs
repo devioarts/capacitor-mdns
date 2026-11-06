@@ -1,4 +1,4 @@
-const external = ['bonjour-service', 'electron'];
+const external = ['bonjour-service', 'electron', 'node:events'];
 
 export default [
   {

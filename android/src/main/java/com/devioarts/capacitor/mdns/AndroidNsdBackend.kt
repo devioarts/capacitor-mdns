@@ -4,9 +4,11 @@ package com.devioarts.capacitor.mdns
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.ext.SdkExtensions
 import java.util.concurrent.Executor
 
 /** Production [MainThread] backed by the application's main looper. */
@@ -29,6 +31,20 @@ internal class AndroidNsdBackend(context: Context) : NsdBackend {
     private val nsd: NsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mainExecutor = Executor { command -> mainHandler.post(command) }
+    private val multicastLock by lazy {
+        (context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager)
+            ?.createMulticastLock("capacitor-mdns")
+    }
+    private val needsMulticastLock = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+        SdkExtensions.getExtensionVersion(Build.VERSION_CODES.TIRAMISU) < 7
+
+    override fun acquireMulticastLock() {
+        if (needsMulticastLock) multicastLock?.acquire()
+    }
+
+    override fun releaseMulticastLock() {
+        if (needsMulticastLock) multicastLock?.release()
+    }
 
     override val supportsConcurrentResolve: Boolean
         get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
@@ -47,8 +63,8 @@ internal class AndroidNsdBackend(context: Context) : NsdBackend {
         val nsdListener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(nsi: NsdServiceInfo) = listener.onRegistered(nsi.serviceName)
             override fun onRegistrationFailed(nsi: NsdServiceInfo, errorCode: Int) = listener.onFailed(errorCode)
-            override fun onServiceUnregistered(nsi: NsdServiceInfo) { /* no-op */ }
-            override fun onUnregistrationFailed(nsi: NsdServiceInfo, errorCode: Int) { /* no-op */ }
+            override fun onServiceUnregistered(nsi: NsdServiceInfo) = listener.onUnregistered()
+            override fun onUnregistrationFailed(nsi: NsdServiceInfo, errorCode: Int) = listener.onUnregistrationFailed(errorCode)
         }
         nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, nsdListener)
         return nsdListener
@@ -61,12 +77,13 @@ internal class AndroidNsdBackend(context: Context) : NsdBackend {
     override fun startDiscovery(type: String, listener: NsdBackend.DiscoveryListener): Any {
         val nsdListener = object : NsdManager.DiscoveryListener {
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) = listener.onStartFailed(errorCode)
-            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) { /* no-op */ }
+            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) = listener.onStopFailed(errorCode)
             override fun onDiscoveryStarted(serviceType: String) { /* no-op */ }
-            override fun onDiscoveryStopped(serviceType: String) { /* no-op */ }
+            override fun onDiscoveryStopped(serviceType: String) = listener.onStopped()
             override fun onServiceFound(si: NsdServiceInfo) =
                 listener.onFound(DiscoveredService(si.serviceName, si.serviceType, si))
-            override fun onServiceLost(serviceInfo: NsdServiceInfo) { /* no-op */ }
+            override fun onServiceLost(si: NsdServiceInfo) =
+                listener.onLost(DiscoveredService(si.serviceName, si.serviceType, si))
         }
         nsd.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, nsdListener)
         return nsdListener
@@ -112,7 +129,8 @@ internal class AndroidNsdBackend(context: Context) : NsdBackend {
             name = s.serviceName,
             type = s.serviceType,
             hosts = hostAddresses(s),
-            port = s.port
+            port = s.port,
+            txt = s.attributes.mapValues { (_, value) -> value?.let { String(it, Charsets.UTF_8) } ?: "" }
         )
 
     private fun hostAddresses(s: NsdServiceInfo): List<String> =

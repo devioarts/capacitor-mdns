@@ -22,18 +22,33 @@ private final class FakeNetService: NetService {
 }
 
 private final class FakeBrowser: NetServiceBrowser {
+    var stopCalls = 0
     override func searchForServices(ofType type: String, inDomain domainString: String) {}
-    override func stop() {}
+    override func stop() { stopCalls += 1 }
+}
+
+private final class WatchProbe: MDNSWatchDelegate {
+    var found: [[String: Any]] = []
+    var lost: [[String: Any]] = []
+    var errors: [(String, Bool)] = []
+    func mdns(_ mdns: MDNS, didFindService service: [String: Any]) { found.append(service) }
+    func mdns(_ mdns: MDNS, didLoseService service: [String: Any]) { lost.append(service) }
+    func mdns(_ mdns: MDNS, watchError type: String, message: String, watching: Bool) { errors.append((message, watching)) }
 }
 
 private final class Rig {
     let mdns = MDNS()
     var services: [FakeNetService] = []
+    var browsers: [FakeBrowser] = []
 
     init(settleMs: Int = 30, publishTimeoutMs: Int = 5000) {
         mdns.settleDebounceMs = settleMs
         mdns.publishTimeoutMs = publishTimeoutMs
-        mdns.makeBrowser = { FakeBrowser() }
+        mdns.makeBrowser = { [weak self] in
+            let browser = FakeBrowser()
+            self?.browsers.append(browser)
+            return browser
+        }
         mdns.makeService = { [weak self] domain, type, name, port in
             let s = port.map { FakeNetService(domain: domain, type: type, name: name, port: $0) }
                 ?? FakeNetService(domain: domain, type: type, name: name)
@@ -105,6 +120,22 @@ final class MDNSTests: XCTestCase {
 
         XCTAssertEqual(rig.services.count, 1)
         XCTAssertEqual(rig.services[0].resolveCalls, 1)
+    }
+
+    func testResolvedServiceWithoutAddressesReturnsEmptyHosts() {
+        let rig = Rig()
+        let done = expectation(description: "discovery")
+        rig.discover(name: "A") { outcome in
+            guard case .success(let services) = outcome else {
+                done.fulfill()
+                return XCTFail("expected success")
+            }
+            XCTAssertEqual(services.first?["hosts"] as? [String], [])
+            done.fulfill()
+        }
+        rig.found("A")
+        rig.mdns.netServiceDidResolveAddress(rig.services[0])
+        wait(for: [done], timeout: 2)
     }
 
     func testTargetNameFiltersCandidatesAndFinishesEarly() {
@@ -271,6 +302,9 @@ final class MDNSTests: XCTestCase {
         XCTAssertEqual(hosts, ["10.1.2.3", "fe80::1"])
         XCTAssertEqual(parseHosts(nil), [])
         XCTAssertEqual(parseHosts([]), [])
+
+        v6.sin6_scope_id = 7
+        XCTAssertEqual(parseHosts([withUnsafeBytes(of: &v6) { Data($0) }]), ["fe80::1%7"])
     }
 
     func testLocalNetworkDeniedDetection() {
@@ -278,4 +312,141 @@ final class MDNSTests: XCTestCase {
         XCTAssertFalse(MDNS.isLocalNetworkDenied(.dns(-65537)))
         XCTAssertFalse(MDNS.isLocalNetworkDenied(.posix(.ECONNREFUSED)))
     }
+}
+
+// MARK: - Continuous discovery regressions
+
+extension MDNSTests {
+    private func watch(_ rig: Rig, _ probe: WatchProbe, types: [String] = ["_http._tcp."]) {
+        rig.mdns.watchDelegate = probe
+        rig.mdns.watchServices(types: types, useNW: false) { result in
+            guard case .success? = Optional(result) else { return XCTFail("watch failed: \(result)") }
+        }
+    }
+
+    func testWatchDeduplicatesTypesAndReturnsFullLostSnapshot() {
+        let rig = Rig()
+        let probe = WatchProbe()
+        watch(rig, probe, types: [" _http._tcp", "_http._tcp.", "_ipp._tcp."])
+        XCTAssertEqual(rig.browsers.count, 2)
+        let browser = rig.browsers[0]
+        let found = FakeNetService(domain: "local.", type: "_http._tcp.", name: "A")
+        rig.mdns.netServiceBrowser(browser, didFind: found, moreComing: false)
+        rig.mdns.netServiceBrowser(browser, didFind: found, moreComing: false)
+        XCTAssertEqual(rig.services.count, 1)
+        rig.mdns.netServiceDidResolveAddress(rig.services[0])
+        XCTAssertEqual(probe.found.count, 1)
+        XCTAssertEqual(probe.found[0]["hosts"] as? [String], [])
+        rig.mdns.netServiceBrowser(browser, didRemove: found, moreComing: false)
+        XCTAssertEqual(probe.lost.count, 1)
+        XCTAssertEqual(probe.lost[0] as NSDictionary, probe.found[0] as NSDictionary)
+        rig.mdns.stopWatching()
+        XCTAssertTrue(rig.browsers.allSatisfy { $0.stopCalls == 1 })
+    }
+
+    func testWatchLossAndStopIgnoreLateResolveAndBrowserCallbacks() {
+        let rig = Rig()
+        let probe = WatchProbe()
+        watch(rig, probe)
+        rig.mdns.handleWatchFound(name: "A", type: "_http._tcp", domain: "local")
+        let oldResolver = rig.services[0]
+        rig.mdns.handleWatchLost(name: "A", type: "_http._tcp.", domain: "local.")
+        rig.resolve(oldResolver)
+        XCTAssertTrue(probe.found.isEmpty)
+        XCTAssertTrue(probe.lost.isEmpty)
+        rig.mdns.handleWatchFound(name: "B", type: "_http._tcp.", domain: "local.")
+        let oldBrowser = rig.browsers[0]
+        rig.mdns.stopWatching()
+        watch(rig, probe)
+        rig.resolve(rig.services[1])
+        rig.mdns.netServiceBrowser(oldBrowser, didFind: oldResolver, moreComing: false)
+        rig.mdns.netServiceBrowser(oldBrowser, didNotSearch: [:])
+        XCTAssertTrue(probe.found.isEmpty)
+        XCTAssertTrue(probe.errors.isEmpty)
+        XCTAssertEqual(rig.services.count, 2)
+        rig.mdns.stopWatching()
+    }
+
+    func testWatchRetriesFailedResolveAndAllowsRediscoveryAfterExhaustion() {
+        let rig = Rig()
+        let probe = WatchProbe()
+        watch(rig, probe)
+        rig.mdns.handleWatchFound(name: "A", type: "_http._tcp.", domain: "local.")
+        for attempt in 0..<4 {
+            rig.mdns.netService(rig.services[attempt], didNotResolve: [:])
+            if attempt < 3 { pause(0.2) }
+        }
+        XCTAssertEqual(probe.errors.count, 1)
+        XCTAssertEqual(probe.errors[0].1, true)
+        rig.mdns.handleWatchFound(name: "A", type: "_http._tcp.", domain: "local.")
+        rig.resolve(rig.services[4])
+        XCTAssertEqual(probe.found.count, 1)
+        rig.mdns.stopWatching()
+    }
+
+    func testWatchRetriesWhenResolverNeverCallsBackAndCancelsRetryOnStop() {
+        let rig = Rig()
+        rig.mdns.resolveTimeoutSeconds = 0.03
+        watch(rig, WatchProbe())
+        rig.mdns.handleWatchFound(name: "A", type: "_http._tcp.", domain: "local.")
+        pause(0.22)
+        XCTAssertGreaterThanOrEqual(rig.services.count, 2)
+        rig.mdns.stopWatching()
+        let count = rig.services.count
+        pause(0.25)
+        XCTAssertEqual(rig.services.count, count)
+    }
+
+    func testWatchAndDiscoverStayIndependentAndInvalidReplacementKeepsWatch() {
+        let rig = Rig()
+        let probe = WatchProbe()
+        watch(rig, probe)
+        var discovery: Result<[[String: Any]], Error>?
+        rig.discover { discovery = $0 }
+        rig.found("Once")
+        rig.mdns.handleWatchFound(name: "Watched", type: "_http._tcp.", domain: "local.")
+        rig.resolve(rig.services[1])
+        XCTAssertEqual(probe.found.count, 1)
+        XCTAssertNil(discovery)
+        for types in [[], [" "], ["http"]] {
+            rig.mdns.watchServices(types: types, useNW: false) { result in
+                guard case .failure = result else { return XCTFail("invalid watch accepted") }
+            }
+        }
+        XCTAssertEqual(rig.browsers[0].stopCalls, 0)
+        rig.mdns.stopWatching()
+        rig.resolve(rig.services[0])
+        pause(0.05)
+        guard case .success(let services)? = discovery else { return XCTFail("discovery failed") }
+        XCTAssertEqual(services.compactMap { $0["name"] as? String }, ["Once"])
+    }
+
+    func testNetworkWatchSnapshotsDeduplicateAndLossCancelsPendingResolution() {
+        let rig = Rig()
+        let probe = WatchProbe()
+        watch(rig, probe)
+        let values = [BrowseService(name: "A", type: "_http._tcp", domain: "local")]
+        rig.mdns.handleWatchResults(values, type: "_http._tcp.")
+        rig.mdns.handleWatchResults(values, type: "_http._tcp.")
+        XCTAssertEqual(rig.services.count, 1)
+        rig.mdns.handleWatchResults([], type: "_http._tcp.")
+        rig.resolve(rig.services[0])
+        XCTAssertTrue(probe.found.isEmpty)
+        XCTAssertTrue(probe.lost.isEmpty)
+        rig.mdns.stopWatching()
+    }
+
+    func testDeniedNetworkPermissionStopsWatchAndReportsError() {
+        let rig = Rig()
+        let probe = WatchProbe()
+        watch(rig, probe)
+        rig.mdns.handleWatchState(.waiting(.dns(-65570)), type: "_http._tcp.")
+        XCTAssertEqual(probe.errors.count, 1)
+        XCTAssertFalse(probe.errors[0].1)
+        XCTAssertTrue(probe.errors[0].0.contains("denied"))
+        XCTAssertEqual(rig.browsers[0].stopCalls, 1)
+        rig.mdns.handleWatchFound(name: "Late", type: "_http._tcp.", domain: "local.")
+        XCTAssertTrue(rig.services.isEmpty)
+    }
+
 }

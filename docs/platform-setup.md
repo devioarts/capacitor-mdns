@@ -50,3 +50,7 @@ Add the local network permissions and every Bonjour service type your app uses t
 
 For a custom service such as `_capmdnse2e._tcp.`, add `_capmdnse2e._tcp` to
 `NSBonjourServices`.
+
+For continuous watching, include every type passed to `watchServices`. For example, watching
+`['_http._tcp.', '_ipp._tcp.']` requires both `_http._tcp` and `_ipp._tcp` entries. A denied
+Local Network permission is reported through `watchError` and stops the watch group.

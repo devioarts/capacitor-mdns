@@ -4,6 +4,7 @@
 //   contextBridge.exposeInMainWorld('mDNS', createMDNSAPI({ ipcRenderer }))
 //   contextBridge.exposeInMainWorld('mdns', createMDNSAPI({ ipcRenderer })) // alias
 module.exports.createMDNSAPI = ({ ipcRenderer }) => {
+  const subscriptions = new Set();
   return {
     /**
      * Return the platform implementation that handled this call.
@@ -30,5 +31,27 @@ module.exports.createMDNSAPI = ({ ipcRenderer }) => {
      * @returns {Promise<{error:boolean,errorMessage:string|null,servicesFound:number,services: Array<{name:string,type:string,domain:string,port:number,hosts:string[],txt?:Record<string,string>}>}>}
      */
     discover: (options) => ipcRenderer.invoke('mdns:discover', options),
+
+    watchServices: (options) => ipcRenderer.invoke('mdns:watchServices', options),
+    stopWatching: () => ipcRenderer.invoke('mdns:stopWatching'),
+    addListener: async (eventName, handler) => {
+      if (!['serviceFound', 'serviceLost', 'watchError'].includes(eventName)) {
+        throw new Error(`Unknown mDNS event: ${eventName}`);
+      }
+      const channel = `mdns:event:${eventName}`;
+      const listener = (_event, data) => handler(data);
+      const subscription = {
+        remove: async () => {
+          ipcRenderer.removeListener(channel, listener);
+          subscriptions.delete(subscription);
+        },
+      };
+      subscriptions.add(subscription);
+      ipcRenderer.on(channel, listener);
+      return subscription;
+    },
+    removeAllListeners: async () => {
+      for (const subscription of [...subscriptions]) await subscription.remove();
+    },
   }
 }

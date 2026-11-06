@@ -22,7 +22,7 @@ import org.json.JSONObject
  *
  * Return shapes:
  * - startBroadcast -> { publishing: boolean, name: string, error: boolean, errorMessage: string|null }
- * - stopBroadcast  -> { publishing: false, error: boolean, errorMessage: string|null }
+ * - stopBroadcast  -> { publishing: boolean, error: boolean, errorMessage: string|null }
  * - discover       -> {
  *       error: boolean, errorMessage: string|null,
  *       servicesFound: number,
@@ -41,8 +41,7 @@ class mDNSPlugin : Plugin() {
     }
 
     override fun handleOnDestroy() {
-        mdns.close()
-        scope.cancel()
+        mdns.close { scope.cancel() }
     }
 
     // ----------------------- Helpers -----------------------
@@ -66,8 +65,8 @@ class mDNSPlugin : Plugin() {
             .put("error", error)
             .put("errorMessage", jnull(msg))
 
-    private fun jsResultStop(error: Boolean, msg: String?): JSObject =
-        JSObject().put("publishing", false)
+    private fun jsResultStop(publishing: Boolean, error: Boolean, msg: String?): JSObject =
+        JSObject().put("publishing", publishing)
             .put("error", error)
             .put("errorMessage", jnull(msg))
 
@@ -77,6 +76,15 @@ class mDNSPlugin : Plugin() {
             .put("errorMessage", jnull(msg))
             .put("servicesFound", services.length())
             .put("services", services)
+
+    private fun serviceObject(s: mDNS.MdnsService): JSObject = JSObject().apply {
+        put("name", s.name)
+        put("type", s.type)
+        put("domain", "local.")
+        put("port", s.port)
+        put("hosts", JSONArray(s.hosts))
+        if (s.txt.isNotEmpty()) put("txt", JSObject().apply { s.txt.forEach { (k, v) -> put(k, v) } })
+    }
 
     // ----------------------- API -----------------------
 
@@ -111,7 +119,7 @@ class mDNSPlugin : Plugin() {
                     call.resolve(jsResultBroadcast(true, published, false, null))
                 },
                 onError = { err ->
-                    call.resolve(jsResultBroadcast(false, "", true, toErrorMessage(err)))
+                    call.resolve(jsResultBroadcast(mdns.isPublishing, "", true, toErrorMessage(err)))
                 }
             )
         } catch (t: Throwable) {
@@ -125,10 +133,11 @@ class mDNSPlugin : Plugin() {
     @PluginMethod
     fun stopBroadcast(call: PluginCall) {
         try {
-            mdns.stopBroadcast()
-            call.resolve(jsResultStop(false, null))
+            mdns.stopBroadcast { publishing, error ->
+                call.resolve(jsResultStop(publishing, error != null, error?.let { toErrorMessage(it) }))
+            }
         } catch (t: Throwable) {
-            call.resolve(jsResultStop(true, toErrorMessage(t)))
+            call.resolve(jsResultStop(true, true, toErrorMessage(t)))
         }
     }
 
@@ -147,22 +156,47 @@ class mDNSPlugin : Plugin() {
         scope.launch {
             try {
                 val list = mdns.discover(type, targetName, timeout)
-                val arr = JSONArray(list.map { s ->
-                    JSObject().apply {
-                        put("name", s.name)
-                        put("type", s.type)         // Android returns full type with dot
-                        put("domain", "local.")     // NSD is mDNS only
-                        val hosts = JSONArray()
-                        s.hosts.forEach { hosts.put(it) }
-                        put("hosts", hosts)
-                        put("port", s.port)
-                        // TXT not available via NSD -> omitted on Android
-                    }
-                })
+                val arr = JSONArray(list.map { serviceObject(it) })
                 call.resolve(jsResultDiscover(false, null, arr))
             } catch (t: Throwable) {
                 call.resolve(jsResultDiscover(true, toErrorMessage(t), JSONArray()))
             }
+        }
+    }
+
+    @PluginMethod
+    fun watchServices(call: PluginCall) {
+        val types = call.getArray("types")
+        val raw = if (types == null) emptyList() else (0 until types.length()).map { types.opt(it) }
+        if (raw.isEmpty() || raw.any { it !is String }) {
+            call.resolve(JSObject().put("error", true).put("errorMessage", "Expected a nonempty array of service types").put("watchersStarted", 0))
+            return
+        }
+        scope.launch {
+            try {
+                val started = mdns.watchServices(raw.map { it as String }, object : mDNS.WatchListener {
+                    override fun onServiceFound(service: mDNS.MdnsService) {
+                        notifyListeners("serviceFound", JSObject().put("service", serviceObject(service)))
+                    }
+                    override fun onServiceLost(service: mDNS.MdnsService) {
+                        notifyListeners("serviceLost", JSObject().put("service", serviceObject(service)))
+                    }
+                    override fun onError(type: String, message: String, watching: Boolean) {
+                        notifyListeners("watchError", JSObject().put("type", type).put("errorMessage", message).put("watching", watching))
+                    }
+                })
+                call.resolve(JSObject().put("error", false).put("errorMessage", JSONObject.NULL).put("watchersStarted", started))
+            } catch (t: Throwable) {
+                call.resolve(JSObject().put("error", true).put("errorMessage", toErrorMessage(t)).put("watchersStarted", 0))
+            }
+        }
+    }
+
+    @PluginMethod
+    fun stopWatching(call: PluginCall) {
+        scope.launch {
+            val error = mdns.stopWatching()
+            call.resolve(JSObject().put("watching", false).put("error", error != null).put("errorMessage", jnull(error?.message)))
         }
     }
 }

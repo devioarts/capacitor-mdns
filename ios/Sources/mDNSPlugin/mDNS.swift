@@ -27,6 +27,9 @@ public class MDNS: NSObject {
 
     // MARK: - Advertising
 
+    public weak var watchDelegate: MDNSWatchDelegate?
+    private var watchSession: WatchSession?
+
     private var publisher: NetService?
     private var publishCompletion: ((Result<String, Error>) -> Void)?
     private var publishTimeout: DispatchWorkItem?
@@ -57,6 +60,7 @@ public class MDNS: NSObject {
     private var settleDebounce: DispatchWorkItem?
 
     deinit {
+        watchSession?.stop()
         publishTimeout?.cancel()
         publisher?.stop()
         publisher?.delegate = nil
@@ -193,7 +197,7 @@ public class MDNS: NSObject {
         let browser = NWBrowser(for: .bonjour(type: typeNoDot, domain: nil), using: params)
         self.nwBrowser = browser
 
-        browser.stateUpdateHandler = { state in
+        browser.stateUpdateHandler = { [weak self] state in
             switch state {
             case .failed(let err):
                 DispatchQueue.main.async { [weak self] in
@@ -245,15 +249,7 @@ public class MDNS: NSObject {
             if seen.contains(key) { continue }
             seen.insert(key)
 
-            var entry: [String: Any] = [
-                "name": box.name,
-                "type": box.type,
-                "domain": box.domain,
-                "port": box.port
-            ]
-            if !box.hosts.isEmpty { entry["hosts"] = box.hosts }
-            if !box.txt.isEmpty { entry["txt"] = box.txt }
-            out.append(entry)
+            out.append(box.result)
         }
 
         // Clear state before invoking the callback.
@@ -432,16 +428,9 @@ extension MDNS: NetServiceDelegate {
 
     // Resolve callbacks
     public func netServiceDidResolveAddress(_ sender: NetService) {
+        if watchResolved(sender) { return }
         guard let box = resolveMap[sender] else { return }
-        box.port = Int(sender.port)
-        box.hosts = parseHosts(sender.addresses)
-        if let txtData = sender.txtRecordData() {
-            let dict = NetService.dictionary(fromTXTRecord: txtData)
-            box.txt = dict.reduce(into: [:]) { acc, e in
-                acc[e.key] = String(data: e.value, encoding: .utf8) ?? ""
-            }
-        }
-        box.resolved = true
+        readResolved(sender, into: box)
 
         // This resolver is done.
         resolveMap.removeValue(forKey: sender)
@@ -458,6 +447,7 @@ extension MDNS: NetServiceDelegate {
     }
 
     public func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        if watchResolveFailed(sender) { return }
         // Drop the unresolved service and try to continue with others.
         guard resolveMap.removeValue(forKey: sender) != nil else { return }
         sender.delegate = nil
@@ -470,16 +460,27 @@ extension MDNS: NetServiceDelegate {
 extension MDNS: NetServiceBrowserDelegate {
 
     public func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+        if watchSession?.browsers.values.contains(where: { $0 === browser }) == true {
+            handleWatchFound(name: service.name, type: service.type, domain: service.domain)
+            return
+        }
+        guard browser === nsBrowser else { return }
         handleServiceFound(name: service.name, type: service.type, domain: service.domain)
         // With nothing outstanding (e.g. the candidate was filtered out) let the system settle.
         if !moreComing { settleIfIdle(session: discoverySession) }
     }
 
     public func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
-        // Not critical for snapshot output; ignore.
+        guard watchSession?.browsers.values.contains(where: { $0 === browser }) == true else { return }
+        handleWatchLost(name: service.name, type: service.type, domain: service.domain)
     }
 
     public func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
+        if let type = watchSession?.browsers.first(where: { $0.value === browser })?.key {
+            failWatch(type: type, error: Self.error("Failed to search for services: \(errorDict)"))
+            return
+        }
+        guard browser === nsBrowser else { return }
         let code = (errorDict[NetService.errorCode] as NSNumber?)?.intValue ?? -1
         let err = NSError(
             domain: "mDNS.discovery",
@@ -487,6 +488,223 @@ extension MDNS: NetServiceBrowserDelegate {
             userInfo: [NSLocalizedDescriptionKey: "Failed to search for services", "info": errorDict]
         )
         finishDiscovery(session: discoverySession, error: err)
+    }
+}
+
+// MARK: - Continuous discovery
+
+public protocol MDNSWatchDelegate: AnyObject {
+    func mdns(_ mdns: MDNS, didFindService service: [String: Any])
+    func mdns(_ mdns: MDNS, didLoseService service: [String: Any])
+    func mdns(_ mdns: MDNS, watchError type: String, message: String, watching: Bool)
+}
+
+internal struct BrowseService {
+    let name: String
+    let type: String
+    let domain: String
+}
+
+private final class WatchSession {
+    var browsers: [String: NetServiceBrowser] = [:]
+    var networkBrowsers: [NWBrowser] = []
+    var known: [String: ServiceBox] = [:]
+    var resolvers: [NetService: ServiceBox] = [:]
+    var retries: [String: DispatchWorkItem] = [:]
+    var attempts: [String: Int] = [:]
+
+    func stop() {
+        for browser in networkBrowsers {
+            browser.stateUpdateHandler = nil
+            browser.browseResultsChangedHandler = nil
+            browser.cancel()
+        }
+        networkBrowsers.removeAll()
+        for browser in browsers.values { browser.delegate = nil; browser.stop() }
+        browsers.removeAll()
+        for resolver in resolvers.keys { resolver.delegate = nil; resolver.stop() }
+        resolvers.removeAll()
+        retries.values.forEach { $0.cancel() }
+        retries.removeAll()
+        known.removeAll()
+        attempts.removeAll()
+    }
+}
+
+extension MDNS {
+    /// Thanks to Idrimi for the original continuous discovery feature (PR #7).
+    public func watchServices(types: [String], useNW: Bool = true, completion: @escaping (Result<Int, Error>) -> Void) {
+        runOnMain { [weak self] in
+            guard let self = self else { completion(.failure(Self.error("mDNS manager released"))); return }
+            var unique: [String] = []
+            for raw in types {
+                let type = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard type.range(of: "^_[^.]+\\._(tcp|udp)\\.?$", options: .regularExpression) != nil else {
+                    completion(.failure(Self.error("Invalid service type: \(raw)")))
+                    return
+                }
+                let normalized = type.hasSuffix(".") ? type : type + "."
+                if !unique.contains(normalized) { unique.append(normalized) }
+            }
+            guard !unique.isEmpty else { completion(.failure(Self.error("Missing or empty 'types' array"))); return }
+            self.stopWatch()
+            let watch = WatchSession()
+            self.watchSession = watch
+            for type in unique {
+                if useNW {
+                    let params = NWParameters()
+                    params.includePeerToPeer = true
+                    let browser = NWBrowser(for: .bonjour(type: String(type.dropLast()), domain: nil), using: params)
+                    watch.networkBrowsers.append(browser)
+                    browser.stateUpdateHandler = { [weak self, weak watch] state in
+                        guard let self = self, let watch = watch, self.watchSession === watch else { return }
+                        self.handleWatchState(state, type: type)
+                    }
+                    browser.browseResultsChangedHandler = { [weak self, weak watch] results, _ in
+                        guard let self = self, let watch = watch, self.watchSession === watch else { return }
+                        let services: [BrowseService] = results.compactMap { result in
+                            guard case let .service(name, type, domain, _) = result.endpoint else { return nil }
+                            return BrowseService(name: name, type: type, domain: domain)
+                        }
+                        self.handleWatchResults(services, type: type)
+                    }
+                    browser.start(queue: .main)
+                } else {
+                    let browser = self.makeBrowser()
+                    browser.includesPeerToPeer = true
+                    browser.delegate = self
+                    watch.browsers[type] = browser
+                    browser.searchForServices(ofType: type, inDomain: "local.")
+                }
+            }
+            completion(.success(unique.count))
+        }
+    }
+
+    public func stopWatching(completion: @escaping () -> Void = {}) {
+        runOnMain { [weak self] in self?.stopWatch(); completion() }
+    }
+
+    private func stopWatch() {
+        let old = watchSession
+        watchSession = nil
+        old?.stop()
+    }
+
+    internal func failWatch(type: String, error: Error) {
+        guard watchSession != nil else { return }
+        stopWatch()
+        watchDelegate?.mdns(self, watchError: type, message: error.localizedDescription, watching: false)
+    }
+
+    internal func handleWatchState(_ state: NWBrowser.State, type: String) {
+        switch state {
+        case .failed(let error): failWatch(type: type, error: error)
+        case .waiting(let error) where Self.isLocalNetworkDenied(error):
+            failWatch(type: type, error: Self.error("Local network access denied. Enable it in Settings > Privacy > Local Network."))
+        default: break
+        }
+    }
+
+    internal func handleWatchResults(_ services: [BrowseService], type: String) {
+        guard let watch = watchSession else { return }
+        var present = Set<String>()
+        for service in services {
+            let normalized = normalizedBox(name: service.name, type: service.type, domain: service.domain)
+            present.insert(normalized.identityKey)
+            handleWatchFound(name: service.name, type: service.type, domain: service.domain)
+        }
+        for box in Array(watch.known.values) where box.type == type && !present.contains(box.identityKey) {
+            guard watchSession === watch else { return }
+            handleWatchLost(name: box.name, type: box.type, domain: box.domain)
+        }
+    }
+
+    private func normalizedBox(name: String, type: String, domain: String) -> ServiceBox {
+        let type = type.hasSuffix(".") ? type : type + "."
+        let domain = domain.isEmpty ? "local." : (domain.hasSuffix(".") ? domain : domain + ".")
+        return ServiceBox(name: name, type: type, domain: domain)
+    }
+
+    internal func handleWatchFound(name: String, type: String, domain: String) {
+        guard let watch = watchSession else { return }
+        let box = normalizedBox(name: name, type: type, domain: domain)
+        guard watch.known[box.identityKey] == nil else { return }
+        watch.known[box.identityKey] = box
+        resolveWatched(box, watch: watch)
+    }
+
+    private func resolveWatched(_ box: ServiceBox, watch: WatchSession) {
+        guard watchSession === watch, watch.known[box.identityKey] === box else { return }
+        watch.retries.removeValue(forKey: box.identityKey)
+        watch.attempts[box.identityKey, default: 0] += 1
+        let service = makeService(box.domain, box.type, box.name, nil)
+        service.includesPeerToPeer = true
+        service.delegate = self
+        watch.resolvers[service] = box
+        let timeout = DispatchWorkItem { [weak self, weak watch, weak service] in
+            guard let self = self, let watch = watch, let service = service, self.watchSession === watch else { return }
+            _ = self.watchResolveFailed(service)
+        }
+        watch.retries[box.identityKey] = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + resolveTimeoutSeconds, execute: timeout)
+        service.resolve(withTimeout: resolveTimeoutSeconds)
+    }
+
+    internal func handleWatchLost(name: String, type: String, domain: String) {
+        guard let watch = watchSession else { return }
+        let key = normalizedBox(name: name, type: type, domain: domain).identityKey
+        guard let box = watch.known.removeValue(forKey: key) else { return }
+        watch.retries.removeValue(forKey: key)?.cancel()
+        watch.attempts.removeValue(forKey: key)
+        for (resolver, pending) in Array(watch.resolvers) where pending === box {
+            watch.resolvers.removeValue(forKey: resolver)
+            resolver.delegate = nil
+            resolver.stop()
+        }
+        if box.resolved { watchDelegate?.mdns(self, didLoseService: box.result) }
+    }
+
+    private func watchResolved(_ sender: NetService) -> Bool {
+        guard let watch = watchSession, let box = watch.resolvers.removeValue(forKey: sender) else { return false }
+        watch.retries.removeValue(forKey: box.identityKey)?.cancel()
+        readResolved(sender, into: box)
+        sender.stop()
+        sender.delegate = nil
+        guard watch.known[box.identityKey] === box else { return true }
+        watchDelegate?.mdns(self, didFindService: box.result)
+        return true
+    }
+
+    private func watchResolveFailed(_ sender: NetService) -> Bool {
+        guard let watch = watchSession, let box = watch.resolvers.removeValue(forKey: sender) else { return false }
+        watch.retries.removeValue(forKey: box.identityKey)?.cancel()
+        sender.delegate = nil
+        sender.stop()
+        let key = box.identityKey
+        if watch.attempts[key, default: 0] < 4 {
+            let retry = DispatchWorkItem { [weak self, weak watch] in
+                guard let self = self, let watch = watch else { return }
+                self.resolveWatched(box, watch: watch)
+            }
+            watch.retries[key] = retry
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150), execute: retry)
+        } else {
+            watch.known.removeValue(forKey: key)
+            watch.attempts.removeValue(forKey: key)
+            watchDelegate?.mdns(self, watchError: box.type, message: "Failed to resolve \(box.name)", watching: true)
+        }
+        return true
+    }
+
+    private func readResolved(_ sender: NetService, into box: ServiceBox) {
+        box.port = Int(sender.port)
+        box.hosts = parseHosts(sender.addresses)
+        box.hostname = sender.hostName
+        if let txt = sender.txtRecordData() {
+            box.txt = NetService.dictionary(fromTXTRecord: txt).mapValues { String(data: $0, encoding: .utf8) ?? "" }
+        }
+        box.resolved = true
     }
 }
 
@@ -500,6 +718,7 @@ private final class ServiceBox: Hashable {
 
     var port: Int = 0
     var hosts: [String] = []
+    var hostname: String?
     var txt: [String: String] = [:]
     var resolved: Bool = false
 
@@ -507,6 +726,13 @@ private final class ServiceBox: Hashable {
         self.name = name
         self.type = type
         self.domain = domain
+    }
+
+    var result: [String: Any] {
+        var value: [String: Any] = ["name": name, "type": type, "domain": domain, "port": port, "hosts": hosts]
+        if let hostname = hostname { value["hostname"] = hostname }
+        if !txt.isEmpty { value["txt"] = txt }
+        return value
     }
 
     var identityKey: String { "\(name)|\(type)|\(domain)" }
@@ -538,10 +764,12 @@ func parseHosts(_ addrs: [Data]?) -> [String] {
                     out.append(String(cString: buf))
                 }
             } else if family == AF_INET6 {
-                var addr6 = sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee.sin6_addr }
+                let address = sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+                var addr6 = address.sin6_addr
                 var buf6 = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
                 if inet_ntop(AF_INET6, &addr6, &buf6, socklen_t(INET6_ADDRSTRLEN)) != nil {
-                    out.append(String(cString: buf6))
+                    let host = String(cString: buf6)
+                    out.append(address.sin6_scope_id == 0 ? host : "\(host)%\(address.sin6_scope_id)")
                 }
             }
         }

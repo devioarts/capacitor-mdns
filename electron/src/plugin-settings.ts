@@ -5,8 +5,15 @@
  */
 export const pluginSettings = {
   pluginClass: 'mDNS',
-  pluginMethods: ['getPluginPlatform', 'startBroadcast', 'stopBroadcast', 'discover'] as const,
-  pluginEvents: [] as const,
+  pluginMethods: [
+    'getPluginPlatform',
+    'startBroadcast',
+    'stopBroadcast',
+    'discover',
+    'watchServices',
+    'stopWatching',
+  ] as const,
+  pluginEvents: ['serviceFound', 'serviceLost', 'watchError'] as const,
 } as const;
 
 export type PluginSettings = typeof pluginSettings;
