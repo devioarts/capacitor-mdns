@@ -3,6 +3,8 @@
 mDNS plugin for Capacitor that supports Bonjour/mDNS advertisements and discovery on iOS,
 Android, Electron, and a safe web fallback.
 
+**Supported Capacitor version: v8.**
+
 #### Supported platforms: &#x2713; iOS &#x2713; Android &#x2713; Electron &#x2713; Web fallback
 
 The in-repository [`playground`](./playground) is the example app used during development.
