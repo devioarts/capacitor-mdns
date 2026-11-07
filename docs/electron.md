@@ -28,13 +28,18 @@ import { mDNS } from '@devioarts/capacitor-mdns/electron';
 
 ## Manual bridge
 
+Continuous discovery uses the same `watchServices`, `stopWatching` and `addListener` API as native
+platforms. After updating the plugin, run `npx cap-electron sync` so the generated metadata includes
+the new methods and the `serviceFound`, `serviceLost`, `watchError` events.
+
 The older manual bridge remains available for apps that do not use
 `devioarts/capacitor-electron`.
 
-Install the runtime Bonjour dependency in the Electron app:
+The Electron runtime needs `bonjour-service`. It is declared as an optional peer dependency
+(only Electron apps need it), so install it in the Electron app:
 
 ```shell
-npm i bonjour-service@1.4.0
+npm i bonjour-service@^1.4.0
 ```
 
 ### Main process
@@ -43,7 +48,10 @@ npm i bonjour-service@1.4.0
 import { app } from 'electron';
 import { mDNS } from '@devioarts/capacitor-mdns/electron';
 
-const mdns = new mDNS();
+const mdns = new mDNS(undefined, {
+  // Only needed for an exact development server or a custom application origin:
+  // trustedOrigins: ['http://localhost:5173'],
+});
 
 app.whenReady().then(() => {
   mdns.init();
@@ -63,3 +71,14 @@ const { createMDNSAPI } = require('@devioarts/capacitor-mdns/electron/mdns-bridg
 contextBridge.exposeInMainWorld('mDNS', createMDNSAPI({ ipcRenderer }));
 contextBridge.exposeInMainWorld('mdns', createMDNSAPI({ ipcRenderer }));
 ```
+
+### IPC trust
+
+Manual handlers accept calls only from a trusted top-level frame. By default these are
+`capacitor-electron://localhost` and `file:` documents inside `app.getAppPath()`.
+Unpackaged apps also accept the Capacitor Electron default dev origin `http://localhost:5173`;
+that default dev origin is disabled in packaged apps.
+For a custom protocol or development server, configure its exact origin with `trustedOrigins`.
+Third-party pages, child frames and other origins are rejected. Event delivery uses the same
+URL allowlist, so windows displaying remote pages do not receive service data. The generated
+Capacitor Electron route additionally applies its runtime's sender validation.

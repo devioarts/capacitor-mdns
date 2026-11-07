@@ -1,5 +1,7 @@
 // src/definitions.ts
 
+import type { PluginListenerHandle } from '@capacitor/core';
+
 /**
  * Key–value map for TXT records of a Bonjour/mDNS service.
  * Values are UTF-8 strings; binary payloads are not supported by this API.
@@ -29,8 +31,7 @@ export interface MdnsPluginPlatformResult {
  *
  * @remarks
  * - `hosts` contains resolved IPv4/IPv6 numeric addresses (no DNS names).
- * - iOS returns `txt` when present. Android (NSD) does not expose TXT records via public APIs,
- *   so `txt` is usually omitted on Android.
+ * - Resolved TXT records are returned when present.
  * - `domain` is typically `"local."`.
  *
  * @public
@@ -45,7 +46,7 @@ export interface MdnsService {
   /** Service domain; typically `"local."`. */
   domain: string;
 
-  /** TCP port the service advertises. */
+  /** Port the service advertises. */
   port: number;
 
   /**
@@ -55,8 +56,11 @@ export interface MdnsService {
    */
   hosts: string[];
 
+  /** Host name when supplied by the platform, e.g. `"my-device.local."`. */
+  hostname?: string;
+
   /**
-   * TXT dictionary (key → value). Usually present on iOS; Android NSD does not populate this.
+   * TXT dictionary (key → value).
    * @remarks Not all services publish TXT data.
    */
   txt?: MdnsTxt;
@@ -66,9 +70,9 @@ export interface MdnsService {
  * Options for starting a Bonjour/mDNS advertisement.
  *
  * @remarks
- * - The `type` **must** end with a dot (`.`). If omitted, the implementation appends it.
+ * - Service types accept an optional trailing dot; results always include it.
  * - Instance `name` should be short and human-readable; the OS may append `" (n)"` to ensure uniqueness.
- * - Android NSD does not expose TXT records to other apps; advertising TXT is supported on iOS.
+ * - Advertising TXT is supported on iOS, Android and Electron. Invalid input preserves the active advertisement.
  * - Native implementations guard publish with a timeout and return `error: true` instead of
  *   leaving the Promise pending when the OS does not deliver a publish callback.
  * - Only one advertisement is active at a time. Starting a new one stops the previous one first.
@@ -84,9 +88,9 @@ export interface MdnsBroadcastOptions {
   type?: string;
 
   /**
-   * Service instance name.
+   * Service instance name (maximum 63 UTF-8 bytes). Defaults to `DevIOArtsMDNS`.
    */
-  name: string;
+  name?: string;
 
   /**
    * TCP port to advertise.
@@ -96,7 +100,7 @@ export interface MdnsBroadcastOptions {
 
   /**
    * Optional TXT key–value pairs (UTF-8 strings).
-   * @remarks May be ignored on Android due to platform limitations.
+   * @remarks Keys must be unique ignoring case, nonempty printable ASCII without `=`. Each `key=value` entry must fit in 255 UTF-8 bytes. The complete record is limited to 1300 bytes including length prefixes. Non-string values are rejected.
    */
   txt?: MdnsTxt;
 }
@@ -108,8 +112,9 @@ export interface MdnsBroadcastOptions {
  * - The `name` filter matches the normalized name and also accepts prefix matches
  *   (to handle OS-added `" (n)"` suffixes).
  * - When `useNW` is `true` on iOS, discovery uses `NWBrowser` for better P2P behavior.
- * - Discovery is timeboxed. Concurrent discovery requests are serialized or safely replace
- *   the previous native session so old callbacks cannot complete a newer request.
+ * - A valid new discovery replaces the previous request with an error on every platform.
+ * - Dots and hyphens are equivalent when matching names; returned names retain their advertised spelling.
+ * - Without a name filter, browsing continues for the entire timeout. With a filter it may finish once a matching IP address resolves.
  *
  * @public
  */
@@ -128,7 +133,7 @@ export interface MdnsDiscoverOptions {
   name?: string;
 
   /**
-   * Discovery timeout in milliseconds.
+   * Discovery timeout in milliseconds. Finite numbers only; fractions are truncated and the delay is clamped to 0–2147483647.
    * @defaultValue `3000`
    */
   timeout?: number;
@@ -153,7 +158,7 @@ export interface MdnsBroadcastResult {
   errorMessage: string | null;
   /** Final (possibly uniquified) service instance name. Empty on failure. */
   name: string;
-  /** Whether the advertiser is currently active. */
+  /** Whether an advertiser is active, or may still be active after failed cleanup. */
   publishing: boolean;
 }
 
@@ -168,7 +173,7 @@ export interface MdnsDiscoverResult {
   errorMessage: string | null;
   /** Convenience count equal to services.length. */
   servicesFound: number;
-  /** Normalized list of discovered services. */
+  /** Resolved services with numeric addresses. Empty on error; partial results are discarded. */
   services: MdnsService[];
 }
 
@@ -182,8 +187,40 @@ export interface MdnsStopResult {
   error: boolean;
   /** Error description or null on success. */
   errorMessage: string | null;
-  /** Whether the advertiser remains active (should be false on success). */
+  /** False after confirmed stop; true when stopping failed and the advertiser may still be active. */
   publishing: boolean;
+}
+
+/** Options for continuous discovery on iOS, Android and Electron. */
+export interface MdnsWatchOptions {
+  /** Nonempty list of service types. Trailing dots are optional; duplicates are merged. */
+  types: string[];
+}
+
+/** Native browsers have been requested; later failures are reported through `watchError`. */
+export interface MdnsWatchResult {
+  error: boolean;
+  errorMessage: string | null;
+  watchersStarted: number;
+}
+
+/** Stops watching independently of any active broadcast. */
+export interface MdnsWatchStopResult {
+  error: boolean;
+  errorMessage: string | null;
+  watching: boolean;
+}
+
+/** Both found and lost events contain a complete service snapshot, including `hosts`. */
+export interface MdnsServiceEvent {
+  service: MdnsService;
+}
+
+/** Browser failures stop the watch; exhausted service resolution retries leave it running. */
+export interface MdnsWatchErrorEvent {
+  type: string;
+  errorMessage: string;
+  watching: boolean;
 }
 
 /**
@@ -235,7 +272,26 @@ export interface mDNSPlugin {
    *
    * @param options - {@link MdnsDiscoverOptions}
    * @returns Promise resolving to `MdnsDiscoverResult`.
-   * @remarks The result list is normalized across platforms. On Android, `txt` is typically absent.
+   * @remarks The result list is normalized across platforms.
    */
   discover(options?: MdnsDiscoverOptions): Promise<MdnsDiscoverResult>;
+
+  /**
+   * Continuously watch several service types. A valid call replaces the previous watch.
+   * Register listeners before starting. Each resolved service emits `serviceFound` once;
+   * disappearance emits `serviceLost` with its last snapshot. No loss is emitted for an
+   * unresolved service. Watching and one-shot discovery can run together.
+   * Thanks to Idrimi for contributing the original continuous discovery feature (PR #7).
+   */
+  watchServices(options: MdnsWatchOptions): Promise<MdnsWatchResult>;
+
+  /** Stop all watchers. No events from that watch are emitted after this resolves. */
+  stopWatching(): Promise<MdnsWatchStopResult>;
+
+  addListener(
+    eventName: 'serviceFound' | 'serviceLost',
+    handler: (event: MdnsServiceEvent) => void,
+  ): Promise<PluginListenerHandle>;
+  addListener(eventName: 'watchError', handler: (event: MdnsWatchErrorEvent) => void): Promise<PluginListenerHandle>;
+  removeAllListeners(): Promise<void>;
 }

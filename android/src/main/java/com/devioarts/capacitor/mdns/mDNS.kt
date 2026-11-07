@@ -3,15 +3,20 @@ package com.devioarts.capacitor.mdns
 
 import android.content.Context
 import android.net.nsd.NsdManager
-import android.net.nsd.NsdServiceInfo
-import android.os.Build
-import android.os.Handler
-import android.os.Looper
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.util.concurrent.Executor
-import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 /**
  * Thin Android NSD (Bonjour/mDNS) wrapper used by the Capacitor bridge.
@@ -23,18 +28,38 @@ import java.util.concurrent.atomic.AtomicReference
  * - Timebox discovery; early-exit when the target match is resolved.
  *
  * Threading:
- * - All public APIs are main-thread safe. Calls hop to the main looper internally,
- *   since NSD APIs deliver callbacks on the main thread and expect a looper.
+ * - All mutable state is confined to the main thread. NSD delivers the legacy listener callbacks on
+ *   its own internal thread, so every callback coming from [NsdBackend] hops to main via [runOnMain]
+ *   before it touches any state.
  *
  * Platform notes:
- * - Android NSD has no public API for TXT records.
+ * - Resolved TXT records are available through NSD attributes.
+ * - Before API 34 only one `resolveService` may be active at a time; resolves are queued here.
  */
-class mDNS(
-    context: Context,
-    private val externalScope: CoroutineScope? = null
+class mDNS internal constructor(
+    private val backend: NsdBackend,
+    private val mainThread: MainThread,
+    private val mainDispatcher: CoroutineDispatcher,
+    private val externalScope: CoroutineScope?,
+    private val publishTimeoutMs: Long,
+    private val resolveTimeoutMs: Long,
+    private val stopTimeoutMs: Long = 3000L
 ) {
+    constructor(context: Context, externalScope: CoroutineScope? = null) : this(
+        AndroidNsdBackend(context),
+        AndroidMainThread(),
+        Dispatchers.Main.immediate,
+        externalScope,
+        PUBLISH_TIMEOUT_MS,
+        RESOLVE_TIMEOUT_MS
+    )
+
     private companion object {
         const val PUBLISH_TIMEOUT_MS = 5000L
+        const val RESOLVE_TIMEOUT_MS = 5000L
+        const val RESOLVE_RETRY_DELAY_MS = 150L
+        const val MAX_RESOLVE_RETRIES = 3
+        val NAME_SUFFIX = Regex(""" \(\d+\)$""")
     }
 
     /** Normalized service representation returned to the bridge. */
@@ -42,36 +67,62 @@ class mDNS(
         val name: String,
         val type: String,
         val hosts: List<String>, // numeric addresses (v4/v6)
-        val port: Int
+        val port: Int,
+        val txt: Map<String, String> = emptyMap()
     )
 
     private class RegistrationSession(
-        val listener: NsdManager.RegistrationListener,
-        val timeoutJob: Job,
         val onSuccess: (String) -> Unit,
         val onError: (Throwable) -> Unit
     ) {
+        var timeoutJob: Job? = null
+        var token: Any? = null
         var completed = false
+        var finished = false
+        /** True once the caller no longer wants it; a late confirmation must be unregistered. */
+        var cancelled = false
+        var stopping = false
+        var stopped = CompletableDeferred<Throwable?>()
+        var lockHeld = false
     }
 
-    /** NSD system service. */
-    private val nsd: NsdManager =
-        context.getSystemService(Context.NSD_SERVICE) as NsdManager
+    /** A discovered candidate waiting for (or undergoing) resolution. */
+    interface WatchListener {
+        fun onServiceFound(service: MdnsService)
+        fun onServiceLost(service: MdnsService)
+        fun onError(type: String, message: String, watching: Boolean)
+    }
 
-    /** Keep strong references to listeners so they outlive registration/discovery. */
-    private var activeRegistration: RegistrationSession? = null
-    private val discListenerRef = AtomicReference<NsdManager.DiscoveryListener?>(null)
+    private inner class Pending(val owner: DiscoverySession, val service: DiscoveredService) {
+        var attempts = 0
+        var done = false
+        var token: Any? = null
+        var timeoutJob: Job? = null
+        var retryJob: Job? = null
+        var generation = 0
+    }
 
     /** Optional external scope (from plugin); otherwise create our own on Main. */
-    private val scope = externalScope ?: CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val discoverMutex = Mutex()
+    private val scope = externalScope ?: CoroutineScope(SupervisorJob() + mainDispatcher)
+    private val broadcastMutex = Mutex()
+    private val watchMutex = Mutex()
+    private var closed = false
 
-    /** Main looper utilities for non-suspending entry points. */
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val mainExecutor = Executor { command -> mainHandler.post(command) }
-    private inline fun runOnMain(crossinline block: () -> Unit) {
-        if (Looper.myLooper() === Looper.getMainLooper()) block() else mainHandler.post { block() }
+    // Main-thread confined state.
+    private var activeRegistration: RegistrationSession? = null
+    private var activeDiscovery: DiscoverySession? = null
+    private var activeWatch: DiscoverySession? = null
+    private val resolveQueue = ArrayDeque<Pending>()
+    private val resolving = mutableSetOf<Pending>()
+    private val discoveryStops = mutableMapOf<Any, CompletableDeferred<Throwable?>>()
+    private val retryDiscoveryStops = mutableSetOf<Any>()
+    internal val isPublishing: Boolean get() = activeRegistration != null
+
+    private fun runOnMain(block: () -> Unit) {
+        if (mainThread.isCurrent()) block() else mainThread.post(block)
     }
+
+    // ---- Broadcast -----------------------------------------------------------
 
     /**
      * Start advertising a service. If already registered, the previous one is unregistered first.
@@ -87,59 +138,67 @@ class mDNS(
         name: String,
         port: Int,
         onSuccess: (String) -> Unit,
-        onError: (Throwable) -> Unit
+        onError: (Throwable) -> Unit,
+        txt: Map<String, String> = emptyMap()
     ) {
         require(port in 1..65535) { "Port must be between 1 and 65535" }
-        val type = if (typeRaw.endsWith(".")) typeRaw else "$typeRaw."
+        val type = MdnsValidation.type(typeRaw)
+        val normalizedName = MdnsValidation.name(name).ifEmpty { "DevIOArtsMDNS" }
+        MdnsValidation.txt(txt)
 
-        runOnMain {
-            try {
-                // Restarting while publish is pending must complete the old JS promise.
-                stopActiveRegistration("Replaced by a new broadcast request")
-
-                val info = NsdServiceInfo().apply {
-                    serviceType = type
-                    serviceName = name
-                    setPort(port)
-                }
-
-                lateinit var session: RegistrationSession
-                val listener = object : NsdManager.RegistrationListener {
-                    override fun onServiceRegistered(nsi: NsdServiceInfo) =
-                        completeRegistrationSuccess(session, nsi.serviceName)
-
-                    override fun onRegistrationFailed(nsi: NsdServiceInfo, errorCode: Int) =
-                        completeRegistrationError(
-                            session,
-                            IllegalStateException("Registration failed: $errorCode"),
-                            clearActive = true
-                        )
-
-                    override fun onServiceUnregistered(nsi: NsdServiceInfo) { /* no-op */ }
-                    override fun onUnregistrationFailed(nsi: NsdServiceInfo, errorCode: Int) { /* no-op */ }
-                }
-
-                val timeoutJob = scope.launch {
-                    delay(PUBLISH_TIMEOUT_MS)
-                    runOnMain {
-                        completeRegistrationError(
-                            session,
-                            IllegalStateException("Timed out waiting for service publish after ${PUBLISH_TIMEOUT_MS}ms"),
-                            clearActive = true,
-                            unregister = true
-                        )
-                    }
-                }
-
-                session = RegistrationSession(listener, timeoutJob, onSuccess, onError)
-                activeRegistration = session
+        scope.launch(mainDispatcher) {
+            broadcastMutex.withLock {
                 try {
-                    nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+                    check(!closed) { "mDNS manager is closed" }
+                    // Restarting while publish is pending must complete the old JS promise.
+                    stopActiveRegistration("Replaced by a new broadcast request")
+                    check(!closed) { "mDNS manager is closed" }
+
+                    val session = RegistrationSession(onSuccess, onError)
+                    val listener = object : NsdBackend.RegistrationListener {
+                        override fun onRegistered(publishedName: String) =
+                            runOnMain { handleRegistered(session, publishedName) }
+
+                        override fun onFailed(errorCode: Int) = runOnMain {
+                            finishRegistration(session)
+                            completeRegistrationError(
+                                session,
+                                IllegalStateException("Registration failed: $errorCode")
+                            )
+                        }
+
+                        override fun onUnregistered() = runOnMain { finishRegistration(session) }
+
+                        override fun onUnregistrationFailed(errorCode: Int) = runOnMain {
+                            session.stopping = false
+                            session.stopped.complete(IllegalStateException("Unregistration failed: $errorCode"))
+                        }
+                    }
+
+                    session.timeoutJob = scope.launch(mainDispatcher) {
+                        delay(publishTimeoutMs)
+                        session.cancelled = true
+                        completeRegistrationError(
+                            session,
+                            IllegalStateException("Timed out waiting for service publish after ${publishTimeoutMs}ms")
+                        )
+                        unregister(session)
+                        releaseRegistrationLock(session)
+                    }
+
+                    activeRegistration = session
+                    try {
+                        backend.acquireMulticastLock()
+                        session.lockHeld = true
+                        session.token = backend.registerService(type, normalizedName, port, txt.toMap(), listener)
+                        if (session.cancelled) unregister(session)
+                    } catch (t: Throwable) {
+                        finishRegistration(session)
+                        completeRegistrationError(session, t)
+                    }
                 } catch (t: Throwable) {
-                    completeRegistrationError(session, t, clearActive = true)
+                    onError(t)
                 }
-            } catch (t: Throwable) {
-                onError(t)
             }
         }
     }
@@ -147,17 +206,25 @@ class mDNS(
     /**
      * Stop advertising the currently registered service (if any). Safe to call multiple times.
      */
-    fun stopBroadcast() {
-        runOnMain {
-            stopActiveRegistration("Publish stopped before completion")
+    fun stopBroadcast(onComplete: (Boolean, Throwable?) -> Unit = { _, _ -> }) {
+        scope.launch(mainDispatcher) {
+            broadcastMutex.withLock {
+                val error = try {
+                    stopActiveRegistration("Publish stopped before completion")
+                    null
+                } catch (t: Throwable) { t }
+                onComplete(isPublishing, error)
+            }
         }
     }
+
+    // ---- Discover ------------------------------------------------------------
 
     /**
      * Discover services, optionally filtering by instance name using a normalized exact-or-prefix match.
      *
      * Behavior:
-     * - Runs on the main dispatcher.
+     * - Runs on the main dispatcher; a new valid call replaces the previous one.
      * - Resolves candidates to host/port.
      * - If `targetName` is provided, compare using normalized names and accept exact OR prefix match.
      * - Early-exits when a matching service is resolved (stops discovery immediately).
@@ -172,216 +239,373 @@ class mDNS(
         typeRaw: String,
         targetName: String? = null,
         timeoutMs: Int = 3000
-    ): List<MdnsService> = discoverMutex.withLock { withContext(Dispatchers.Main.immediate) {
-        val type = if (typeRaw.endsWith(".")) typeRaw else "$typeRaw."
-
-        // Prepare state
-        discListenerRef.getAndSet(null)?.let { safeStopDiscovery(it) }
-        val found = mutableListOf<MdnsService>()
-        val serviceInfoCallbacks = mutableListOf<NsdManager.ServiceInfoCallback>()
-        val result = CompletableDeferred<List<MdnsService>>()
-
-        // Normalization for "(n)" suffix appended by the OS.
-        fun normalize(s: String): String = s.replace(Regex(" \\(\\d+\\)\$"), "")
-        fun matchesTarget(candidate: String): Boolean {
-            val c = normalize(candidate)
-            val t = normalize(targetName ?: return true) // if no target, accept all
-            return (c == t) || c.startsWith(t)
-        }
-        fun upsert(item: MdnsService) {
-            val index = found.indexOfFirst { it.name == item.name && it.type == item.type && it.port == item.port }
-            if (index >= 0) found[index] = item else found.add(item)
-        }
-        fun unregisterServiceInfoCallbacks() {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
-            serviceInfoCallbacks.toList().forEach { safeUnregisterServiceInfoCallback(it) }
-            serviceInfoCallbacks.clear()
-        }
-        fun completeWithCurrentResults(discoveryListener: NsdManager.DiscoveryListener) {
-            unregisterServiceInfoCallbacks()
-            safeStopDiscovery(discoveryListener)
-            discListenerRef.compareAndSet(discoveryListener, null)
-            if (!result.isCompleted) result.complete(found.toList())
-        }
-        fun completeWithError(discoveryListener: NsdManager.DiscoveryListener, error: Throwable) {
-            unregisterServiceInfoCallbacks()
-            safeStopDiscovery(discoveryListener)
-            discListenerRef.compareAndSet(discoveryListener, null)
-            if (!result.isCompleted) result.completeExceptionally(error)
-        }
-
-        @Suppress("DEPRECATION")
-        fun resolveLegacy(si: NsdServiceInfo, discoveryListener: NsdManager.DiscoveryListener) {
+    ): List<MdnsService> = withContext(mainDispatcher) {
+            check(!closed) { "mDNS manager is closed" }
+            val type = MdnsValidation.type(typeRaw)
+            val target = MdnsValidation.name(targetName).takeIf { it.isNotEmpty() }
+            activeDiscovery?.fail(IllegalStateException("Discovery replaced by a new request"))
+            val session = DiscoverySession(listOf(type), target)
+            activeDiscovery = session
             try {
-                nsd.resolveService(si, object : NsdManager.ResolveListener {
-                    override fun onResolveFailed(s: NsdServiceInfo, errorCode: Int) { /* ignore */ }
-
-                    override fun onServiceResolved(s: NsdServiceInfo) {
-                        if (result.isCompleted) return
-                        upsert(toMdnsService(s))
-
-                        // Early-exit for exact/prefix target match.
-                        if (targetName != null && matchesTarget(s.serviceName)) {
-                            completeWithCurrentResults(discoveryListener)
-                        }
-                    }
-                })
-            } catch (_: Throwable) {
-                // Some Android releases throw when the NSD daemon is busy; ignore this candidate.
+                session.start(timeoutMs.coerceAtLeast(0).toLong())
+                session.result.await()
+            } finally {
+                // Cleanup in all cases (early-exit, timeout, error or cancellation).
+                session.close()
+                if (activeDiscovery === session) activeDiscovery = null
             }
-        }
-
-        fun registerServiceInfoCallback(si: NsdServiceInfo, discoveryListener: NsdManager.DiscoveryListener) {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                resolveLegacy(si, discoveryListener)
-                return
-            }
-
-            val callback = object : NsdManager.ServiceInfoCallback {
-                override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) { /* ignore */ }
-                override fun onServiceInfoCallbackUnregistered() { /* no-op */ }
-                override fun onServiceLost() { /* no-op */ }
-
-                override fun onServiceUpdated(serviceInfo: NsdServiceInfo) {
-                    if (result.isCompleted) return
-                    upsert(toMdnsService(serviceInfo))
-
-                    // Early-exit for exact/prefix target match.
-                    if (targetName != null && matchesTarget(serviceInfo.serviceName)) {
-                        completeWithCurrentResults(discoveryListener)
-                    }
-                }
-            }
-
-            serviceInfoCallbacks.add(callback)
-            try {
-                nsd.registerServiceInfoCallback(si, mainExecutor, callback)
-            } catch (_: Throwable) {
-                serviceInfoCallbacks.remove(callback)
-            }
-        }
-
-        val listener = object : NsdManager.DiscoveryListener {
-            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
-                completeWithError(this, IllegalStateException("Discovery failed to start: $errorCode"))
-            }
-            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) { /* no-op */ }
-            override fun onDiscoveryStarted(serviceType: String) { /* no-op */ }
-            override fun onDiscoveryStopped(serviceType: String) { /* no-op */ }
-
-            override fun onServiceFound(si: NsdServiceInfo) {
-                if (result.isCompleted) return
-                if (targetName != null && !matchesTarget(si.serviceName)) return
-
-                val discoveryListener = this
-                registerServiceInfoCallback(si, discoveryListener)
-            }
-
-            override fun onServiceLost(serviceInfo: NsdServiceInfo) { /* no-op */ }
-        }
-
-        // Start discovery and schedule timeout
-        discListenerRef.set(listener)
-        try {
-            nsd.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, listener)
-        } catch (t: Throwable) {
-            discListenerRef.compareAndSet(listener, null)
-            throw t
-        }
-
-        val timeoutJob = scope.launch {
-            delay(timeoutMs.coerceAtLeast(0).toLong())
-            completeWithCurrentResults(listener)
-        }
-
-        try {
-            result.await()
-        } finally {
-            // Cleanup in all cases (early-exit or timeout)
-            timeoutJob.cancel()
-            unregisterServiceInfoCallbacks()
-            if (discListenerRef.compareAndSet(listener, null)) safeStopDiscovery(listener)
-        }
-    } }
+    }
 
     /**
      * Close the manager and release any outstanding NSD listeners.
      * Safe to call multiple times; also invoked by the plugin's handleOnDestroy().
      */
-    fun close() {
+    fun close(onComplete: () -> Unit = {}) {
         runOnMain {
-            stopActiveRegistration("mDNS manager closed before publish completed")
-            discListenerRef.getAndSet(null)?.let { safeStopDiscovery(it) }
+            closed = true
+            val watch = activeWatch
+            activeWatch = null
+            watch?.close()
+            activeDiscovery?.fail(IllegalStateException("mDNS manager closed before discovery completed"))
+            scope.launch(mainDispatcher) {
+                try {
+                    watchMutex.withLock { stopWatch() }
+                    broadcastMutex.withLock {
+                        stopActiveRegistration("mDNS manager closed before publish completed")
+                    }
+                } catch (_: Throwable) {
+                    // Keep the registration for cleanup if the OS confirms it after close.
+                } finally {
+                    activeRegistration?.let { releaseRegistrationLock(it) }
+                    onComplete()
+                    if (externalScope == null) scope.cancel()
+                }
+            }
         }
-        if (externalScope == null) scope.cancel()
     }
 
-    // ---- Internal helpers ----------------------------------------------------
+    // ---- Registration helpers ------------------------------------------------
 
-    /** Best-effort unregister; NSD may throw if already unregistered. */
-    private fun safeUnregister(l: NsdManager.RegistrationListener) {
-        try { nsd.unregisterService(l) } catch (_: Throwable) {}
+    private fun handleRegistered(session: RegistrationSession, publishedName: String) {
+        if (session.finished) return
+        if (session.cancelled) {
+            // The caller gave up (stop/replace/timeout) before the OS confirmed: undo it now.
+            unregister(session)
+            return
+        }
+        completeRegistrationSuccess(session, publishedName)
     }
 
     private fun completeRegistrationSuccess(session: RegistrationSession, publishedName: String) {
         if (session.completed) return
         session.completed = true
-        session.timeoutJob.cancel()
+        session.timeoutJob?.cancel()
         session.onSuccess(publishedName)
     }
 
     private fun completeRegistrationError(
         session: RegistrationSession,
-        error: Throwable,
-        clearActive: Boolean,
-        unregister: Boolean = false
+        error: Throwable
     ) {
         if (session.completed) return
         session.completed = true
-        session.timeoutJob.cancel()
-        if (unregister) safeUnregister(session.listener)
-        if (clearActive && activeRegistration === session) activeRegistration = null
+        session.timeoutJob?.cancel()
         session.onError(error)
     }
 
-    private fun stopActiveRegistration(reason: String) {
+    private suspend fun stopActiveRegistration(reason: String) {
         val session = activeRegistration ?: return
-        activeRegistration = null
-        safeUnregister(session.listener)
-        if (!session.completed) {
-            completeRegistrationError(session, IllegalStateException(reason), clearActive = false)
-        } else {
-            session.timeoutJob.cancel()
+        session.cancelled = true
+        completeRegistrationError(session, IllegalStateException(reason))
+        if (session.stopped.isCompleted) session.stopped = CompletableDeferred()
+        // NsdManager identifies pending requests by their listener, so cancellation need not wait for confirmation.
+        unregister(session)
+        try {
+            withTimeout(stopTimeoutMs) { session.stopped.await() }?.let { throw it }
+        } catch (t: Throwable) {
+            releaseRegistrationLock(session)
+            if (t is TimeoutCancellationException) {
+                throw IllegalStateException("Timed out waiting for service stop after ${stopTimeoutMs}ms")
+            }
+            throw t
         }
     }
 
-    /** Best-effort stop discovery; NSD may throw if discovery is not active. */
-    private fun safeStopDiscovery(l: NsdManager.DiscoveryListener) {
-        try { nsd.stopServiceDiscovery(l) } catch (_: Throwable) {}
+    private fun unregister(session: RegistrationSession) {
+        if (session.stopping) return
+        val token = session.token ?: return
+        session.stopping = true
+        try {
+            backend.unregisterService(token)
+        } catch (t: Throwable) {
+            session.stopping = false
+            session.stopped.complete(t)
+        }
     }
+
+    private fun finishRegistration(session: RegistrationSession) {
+        session.finished = true
+        if (activeRegistration === session) activeRegistration = null
+        releaseRegistrationLock(session)
+        session.stopped.complete(null)
+    }
+
+    private fun releaseRegistrationLock(session: RegistrationSession) {
+        if (!session.lockHeld) return
+        session.lockHeld = false
+        backend.releaseMulticastLock()
+    }
+
+    // ---- Discovery session ---------------------------------------------------
+
+    /** Thanks to Idrimi for the original continuous discovery feature (PR #7). */
+    suspend fun watchServices(typesRaw: List<String>, listener: WatchListener): Int = watchMutex.withLock { withContext(mainDispatcher) {
+        check(!closed) { "mDNS manager is closed" }
+        require(typesRaw.isNotEmpty()) { "Missing or empty 'types' array" }
+        val types = typesRaw.map { MdnsValidation.type(it.also { raw -> require(raw.isNotBlank()) { "Invalid service type" } }) }.distinct()
+        stopWatch()?.let { throw it }
+        check(!closed) { "mDNS manager is closed" }
+        val session = DiscoverySession(types, null, listener)
+        activeWatch = session
+        try {
+            session.start(null)
+            types.size
+        } catch (t: Throwable) {
+            session.close()
+            if (activeWatch === session) activeWatch = null
+            throw t
+        }
+    } }
+
+    suspend fun stopWatching(): Throwable? = watchMutex.withLock { withContext(mainDispatcher) { stopWatch() } }
+
+    private suspend fun stopWatch(): Throwable? {
+        val old = activeWatch
+        activeWatch = null
+        val errors = mutableListOf<Throwable>()
+        old?.close()
+        for ((token, initial) in discoveryStops.toMap()) {
+            val result = if (retryDiscoveryStops.remove(token)) requestDiscoveryStop(token) else initial
+            val error = try { withTimeout(stopTimeoutMs) { result.await() } }
+            catch (t: Throwable) { if (t is TimeoutCancellationException) IllegalStateException("Timed out waiting for discovery stop") else t }
+            if (error != null) { retryDiscoveryStops += token; errors += error }
+        }
+        return errors.firstOrNull()
+    }
+
+    private fun requestDiscoveryStop(token: Any): CompletableDeferred<Throwable?> {
+        val result = CompletableDeferred<Throwable?>()
+        discoveryStops[token] = result
+        try { backend.stopDiscovery(token) }
+        catch (t: Throwable) { result.complete(t) }
+        return result
+    }
+
+    /** Discovery and watching share the device's single legacy resolver slot. */
+    private fun enqueue(p: Pending) {
+        if (p.done) return
+        if (backend.supportsConcurrentResolve) startResolve(p)
+        else { resolveQueue.addLast(p); pump() }
+    }
+
+    private fun pump() {
+        if (resolving.isNotEmpty()) return
+        val p = resolveQueue.removeFirstOrNull() ?: return
+        startResolve(p)
+    }
+
+    private fun startResolve(p: Pending) {
+        if (p.done) return
+        val generation = ++p.generation
+        resolving.add(p)
+        p.timeoutJob = scope.launch(mainDispatcher) {
+            delay(resolveTimeoutMs)
+            if (p.generation != generation) return@launch
+            if (p.done) { finishResolve(p); pump(); return@launch }
+            resolveFailed(p, "Timed out resolving ${p.service.name}", retry = p.owner.isWatching)
+        }
+        val listener = object : NsdBackend.ResolveListener {
+            override fun onResolved(service: MdnsService) = runOnMain {
+                if (p.generation != generation || p !in resolving) return@runOnMain
+                if (p.done) { finishResolve(p); pump(); return@runOnMain }
+                if (service.hosts.isEmpty()) {
+                    resolveFailed(p, "Resolved service has no IP address", retry = true)
+                    return@runOnMain
+                }
+                finishResolve(p)
+                p.owner.resolved(p, service)
+                pump()
+            }
+            override fun onFailed(errorCode: Int) = runOnMain {
+                if (p.generation != generation) return@runOnMain
+                if (p.done) { finishResolve(p); pump(); return@runOnMain }
+                resolveFailed(p, "Resolve failed: $errorCode", p.owner.isWatching || errorCode == NsdManager.FAILURE_ALREADY_ACTIVE)
+            }
+        }
+        try {
+            p.token = backend.resolve(p.service, listener)
+            if (p.done) p.token?.let { safeCancelResolve(it) }
+        } catch (t: Throwable) {
+            resolveFailed(p, t.message ?: "Resolve failed", retry = p.owner.isWatching)
+        }
+    }
+
+    private fun resolveFailed(p: Pending, message: String, retry: Boolean) {
+        if (p.done || p !in resolving) return
+        p.timeoutJob?.cancel()
+        resolving.remove(p)
+        p.token?.let { safeCancelResolve(it) }
+        p.token = null
+        if (retry && p.attempts++ < MAX_RESOLVE_RETRIES) {
+            p.retryJob = scope.launch(mainDispatcher) {
+                delay(RESOLVE_RETRY_DELAY_MS)
+                enqueue(p)
+            }
+        } else {
+            p.done = true
+            p.owner.resolveFailed(p, message)
+        }
+        pump()
+    }
+
+    private fun finishResolve(p: Pending, cancelled: Boolean = false) {
+        p.done = true
+        p.retryJob?.cancel()
+        resolveQueue.remove(p)
+        // Legacy NSD cannot cancel a resolve; reserve its slot until its callback or timeout.
+        if (cancelled && !backend.supportsConcurrentResolve && p in resolving) return
+        p.timeoutJob?.cancel()
+        resolving.remove(p)
+        p.token?.let { safeCancelResolve(it) }
+    }
+
+    /** One browser group, with its own membership, callbacks and multicast lock. */
+    private inner class DiscoverySession(
+        private val types: List<String>,
+        private val targetName: String?,
+        private val watchListener: WatchListener? = null
+    ) {
+        val result = CompletableDeferred<List<MdnsService>>()
+        val isWatching get() = watchListener != null
+        private val found = linkedMapOf<String, MdnsService>()
+        private val pending = mutableMapOf<String, Pending>()
+        private val discoveryTokens = mutableListOf<Any>()
+        private var timeoutJob: Job? = null
+        private var closed = false
+        private var lockHeld = false
+
+        fun start(timeoutMs: Long?) {
+            backend.acquireMulticastLock()
+            lockHeld = true
+            if (timeoutMs != null) timeoutJob = scope.launch(mainDispatcher) {
+                delay(timeoutMs)
+                finish()
+            }
+            for (type in types) {
+                if (closed) return
+                var token: Any? = null
+                var startFailed = false
+                val listener = object : NsdBackend.DiscoveryListener {
+                    override fun onStartFailed(errorCode: Int) = runOnMain {
+                        startFailed = true
+                        discoveryTokens.remove(token)
+                        fail(IllegalStateException("Discovery failed to start: $errorCode"), type)
+                    }
+                    override fun onStopFailed(errorCode: Int) = runOnMain {
+                        val error = IllegalStateException("Discovery failed to stop: $errorCode")
+                        if (closed) token?.let { discoveryStops[it]?.complete(error) }
+                        else fail(error, type)
+                    }
+                    override fun onStopped() = runOnMain {
+                        token?.let { discoveryStops.remove(it)?.complete(null); retryDiscoveryStops.remove(it) }
+                        if (!closed) fail(IllegalStateException("Discovery stopped unexpectedly"), type)
+                    }
+                    override fun onFound(service: DiscoveredService) = runOnMain {
+                        handleFound(DiscoveredService(service.name, type, service.handle))
+                    }
+                    override fun onLost(service: DiscoveredService) = runOnMain {
+                        if (closed || !isWatching) return@runOnMain
+                        val key = key(service.name, type)
+                        pending.remove(key)?.let { finishResolve(it, cancelled = true); pump() }
+                        found.remove(key)?.let { watchListener?.onServiceLost(it) }
+                    }
+                }
+                val startedToken = backend.startDiscovery(type, listener)
+                token = startedToken
+                if (startFailed) continue
+                if (closed) requestDiscoveryStop(startedToken) else discoveryTokens += startedToken
+            }
+        }
+
+        fun finish() {
+            if (closed) return
+            val snapshot = found.values.toList()
+            close()
+            result.complete(snapshot)
+        }
+
+        fun fail(error: Throwable, type: String = types.first()) {
+            if (closed) return
+            close()
+            if (isWatching) {
+                if (activeWatch === this) activeWatch = null
+                watchListener?.onError(type, error.message ?: "Discovery failed", false)
+            } else result.completeExceptionally(error)
+        }
+
+        fun close() {
+            if (closed) return
+            closed = true
+            timeoutJob?.cancel()
+            pending.values.toList().forEach { finishResolve(it, cancelled = true) }
+            pending.clear()
+            pump()
+            for (token in discoveryTokens) {
+                requestDiscoveryStop(token)
+            }
+            discoveryTokens.clear()
+            if (lockHeld) {
+                lockHeld = false
+                backend.releaseMulticastLock()
+            }
+        }
+
+        private fun key(name: String, type: String) = "$name|$type"
+
+        private fun handleFound(service: DiscoveredService) {
+            if (closed || !matchesTarget(service.name)) return
+            val key = key(service.name, service.type)
+            if (key in found || key in pending) return
+            val p = Pending(this, service)
+            pending[key] = p
+            enqueue(p)
+        }
+
+        fun resolved(p: Pending, service: MdnsService) {
+            val key = key(p.service.name, p.service.type)
+            if (closed || pending.remove(key) !== p) return
+            val item = service.copy(type = p.service.type, hosts = service.hosts.toList(), txt = service.txt.toMap())
+            found[key] = item
+            if (isWatching) watchListener?.onServiceFound(item)
+            else if (targetName != null && matchesTarget(item.name)) finish()
+        }
+
+        fun resolveFailed(p: Pending, message: String) {
+            if (closed || pending.remove(key(p.service.name, p.service.type)) !== p) return
+            watchListener?.onError(p.service.type, message, true)
+        }
+
+        private fun matchesTarget(candidate: String): Boolean {
+            val target = targetName ?: return true
+            return normalize(candidate).startsWith(normalize(target))
+        }
+    }
+
+    /** Normalization for the " (n)" suffix appended by the OS. */
+    private fun normalize(s: String): String = s.replace(NAME_SUFFIX, "").replace('.', '-')
 
     /** Best-effort stop service info updates; NSD may throw if not registered. */
-    private fun safeUnregisterServiceInfoCallback(l: NsdManager.ServiceInfoCallback) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            try { nsd.unregisterServiceInfoCallback(l) } catch (_: Throwable) {}
-        }
+    private fun safeCancelResolve(token: Any) {
+        try { backend.cancelResolve(token) } catch (_: Throwable) {}
     }
-
-    private fun toMdnsService(s: NsdServiceInfo): MdnsService =
-        MdnsService(
-            name = s.serviceName,
-            type = s.serviceType,
-            hosts = hostAddresses(s),
-            port = s.port
-        )
-
-    private fun hostAddresses(s: NsdServiceInfo): List<String> =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            s.hostAddresses.mapNotNull { it.hostAddress }
-        } else {
-            legacyHostAddress(s)?.let { listOf(it) } ?: emptyList()
-        }
-
-    @Suppress("DEPRECATION")
-    private fun legacyHostAddress(s: NsdServiceInfo): String? = s.host?.hostAddress
 }

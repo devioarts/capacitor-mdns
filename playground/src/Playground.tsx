@@ -5,7 +5,6 @@ import { tabs } from "./tabs.tsx";
 
 export const Playground: React.FC = () => {
   const [active, setActive] = useState<string>("broadcast");
-  const activeTab = tabs.find((tab) => tab.id === active);
 
   const barRef = useRef<HTMLDivElement>(null);
   const [fadeLeft, setFadeLeft] = useState(false);
@@ -62,7 +61,7 @@ export const Playground: React.FC = () => {
         )}
       </div>
       <div className="flex-1 overflow-auto px-4 py-6">
-        {activeTab?.page}
+        {tabs.map(tab => <div key={tab.id} hidden={tab.id !== active}>{tab.page}</div>)}
       </div>
     </div>
   );

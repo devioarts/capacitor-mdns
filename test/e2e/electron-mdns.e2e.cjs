@@ -2,6 +2,39 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { mDNS } = require('../../.tmp/e2e-build/electron/mdns.js');
 
+test('continuous watch finds and loses real services of two types', async () => {
+  const watcher = new mDNS();
+  const publishers = [new mDNS(), new mDNS()];
+  const types = ['_capmdnswatch._tcp.', '_capmdnsw2._udp.'];
+  const names = publishers.map((_, index) => `Watch-${process.pid}-${Date.now()}-${index}`);
+  const found = new Map(), lost = new Map();
+  watcher.on('serviceFound', event => found.set(event.service.name, event.service));
+  watcher.on('serviceLost', event => lost.set(event.service.name, event.service));
+  const waitFor = async (condition) => {
+    const deadline = Date.now() + 7000;
+    while (!condition() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.ok(condition(), `Missing watch events: found=${JSON.stringify([...found])}, lost=${JSON.stringify([...lost])}`);
+  };
+  try {
+    assert.equal((await watcher.watchServices({ types })).watchersStarted, 2);
+    for (let i = 0; i < publishers.length; i++) {
+      const result = await publishers[i].startBroadcast({ type: types[i], name: names[i], port: 43215 + i, txt: { test: 'watch' } });
+      assert.equal(result.error, false, result.errorMessage);
+    }
+    await waitFor(() => names.every(name => found.has(name)));
+    for (const publisher of publishers) await publisher.stopBroadcast();
+    await waitFor(() => names.every(name => lost.has(name)));
+    for (const name of names) {
+      assert.equal(lost.get(name).port, found.get(name).port);
+      assert.equal(lost.get(name).type, found.get(name).type);
+      assert.ok(Array.isArray(lost.get(name).hosts));
+    }
+    assert.equal((await watcher.stopWatching()).error, false);
+  } finally {
+    await Promise.all([watcher, ...publishers].map(instance => instance.destroy()));
+  }
+});
+
 const withTimeout = (promise, ms, label) =>
   Promise.race([
     promise,

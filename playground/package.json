@@ -32,7 +32,7 @@
     "dev": "vite",
     "build": "npm run build:vite && npm run build:electron",
     "build:vite": "tsc -b && vite build",
-    "build:electron": "npx cap-electron prepare",
+    "build:electron": "npx cap-electron sync && npx cap-electron prepare",
     "lint": "eslint .",
     "preview": "vite preview",
     "copy": "npx cap copy",
@@ -43,7 +43,8 @@
     "electron:dist": "npm run build && npx cap-electron sync && cd electron && npm run dist",
     "electron:dist:win": "npm run build && npx cap-electron sync && cd electron && npm run dist:win",
     "electron:dist:mac": "npm run build && npx cap-electron sync && cd electron && npm run dist:mac",
-    "electron:dist:lnx": "npm run build && npx cap-electron sync && cd electron && npm run dist:linux"
+    "electron:dist:lnx": "npm run build && npx cap-electron sync && cd electron && npm run dist:linux",
+    "capacitor:sync:after": "node scripts/configure-native.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.0.0",

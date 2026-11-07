@@ -46,7 +46,6 @@ jobs:
 
   ios:
     name: iOS build and tests
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5

@@ -45,8 +45,14 @@ Add the local network permissions and every Bonjour service type your app uses t
 <key>NSBonjourServices</key>
 <array>
     <string>_http._tcp</string>
+    <string>_airplay._tcp</string>
+    <string>_googlecast._tcp</string>
 </array>
 ```
 
 For a custom service such as `_capmdnse2e._tcp.`, add `_capmdnse2e._tcp` to
 `NSBonjourServices`.
+
+For continuous watching, include every type passed to `watchServices`. For example, watching
+`['_http._tcp.', '_airplay._tcp.', '_googlecast._tcp.']` requires all three entries shown above. A denied
+Local Network permission is reported through `watchError` and stops the watch group.
