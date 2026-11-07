@@ -85,20 +85,27 @@ final class MDNSTests: XCTestCase {
         wait(for: [e], timeout: seconds + 2)
     }
 
-    func testBrowsingContinuesForTheEntireTimeoutAfterAnIdleResult() {
+    func testUnfilteredDiscoveryWaitsForItsScheduledTimeout() {
         let rig = Rig()
+        var scheduledTimeout: DispatchWorkItem?
+        rig.mdns.scheduleDiscoveryTimeout = { delayMs, work in
+            XCTAssertEqual(delayMs, 300)
+            scheduledTimeout = work
+        }
         var outcome: Result<[[String: Any]], Error>?
-        let done = expectation(description: "full timeout")
-        rig.discover(timeoutMs: 300) { outcome = $0; done.fulfill() }
+        rig.discover(timeoutMs: 300) { outcome = $0 }
+        guard let timeout = scheduledTimeout else { return XCTFail("expected discovery timeout") }
         rig.found("First")
+        guard rig.services.count == 1 else { return XCTFail("expected first resolver") }
         rig.resolve(rig.services[0])
-        pause(0.15)
         XCTAssertNil(outcome)
         rig.found("Late")
+        guard rig.services.count == 2 else { return XCTFail("expected late resolver") }
         rig.resolve(rig.services[1])
-        wait(for: [done], timeout: 1)
+        XCTAssertNil(outcome)
+        timeout.perform()
         guard case .success(let services)? = outcome else { return XCTFail("expected success") }
-        XCTAssertEqual(services.count, 2)
+        XCTAssertEqual(services.compactMap { $0["name"] as? String }, ["First", "Late"])
     }
     func testNameMatchingTreatsDotsAndHyphensEqually() {
         let rig = Rig()
