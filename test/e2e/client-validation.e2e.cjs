@@ -24,3 +24,23 @@ test('invalid timeouts never cross the JSON bridge or replace an existing search
   assert.deepEqual(calls, [{ timeout: 50 }]);
   assert.equal(exports.mDNS.stopWatching, platform.stopWatching);
 });
+
+test('missing Electron registration reports the regeneration step for both incomplete runtime shapes', async () => {
+  for (const runtime of [{ name: 'electron' }, { name: 'electron', plugins: {} }]) {
+    let loader;
+    const exports = {};
+    const code = ts.transpileModule(readFileSync('src/index.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+    vm.runInNewContext(code, {
+      exports, window: { CapacitorCustomPlatform: runtime },
+      require: name => name === '@capacitor/core' ? { registerPlugin: (_, implementations) => {
+        loader = implementations.electron;
+        return { discover: options => Promise.resolve().then(loader).then(plugin => plugin.discover(options)) };
+      } } : {},
+    });
+    await assert.rejects(exports.mDNS.discover(), /mDNS Electron plugin is not registered; run npx cap-electron sync/);
+    const platform = { discover: async () => ({ error: false }) };
+    runtime.plugins = { mDNS: platform };
+    assert.equal(await loader(), platform);
+    assert.equal((await exports.mDNS.discover()).error, false);
+  }
+});

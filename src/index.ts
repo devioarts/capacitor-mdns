@@ -4,7 +4,11 @@ import type { MdnsDiscoverOptions, mDNSPlugin } from './definitions';
 
 const platformPlugin = registerPlugin<mDNSPlugin>('mDNS', {
   web: () => import('./web').then((m) => new m.mDNSWeb()),
-  electron: () => Promise.resolve((window as any).CapacitorCustomPlatform.plugins.mDNS as mDNSPlugin),
+  electron: () => {
+    const plugin = (window as any).CapacitorCustomPlatform?.plugins?.mDNS as mDNSPlugin | undefined;
+    if (!plugin) throw new Error('mDNS Electron plugin is not registered; run npx cap-electron sync in the app');
+    return Promise.resolve(plugin);
+  },
 });
 
 const mDNS = new Proxy(platformPlugin, {

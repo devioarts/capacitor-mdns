@@ -584,7 +584,7 @@ class mDNS internal constructor(
         fun resolved(p: Pending, service: MdnsService) {
             val key = key(p.service.name, p.service.type)
             if (closed || pending.remove(key) !== p) return
-            val item = service.copy(type = p.service.type, hosts = service.hosts.toList(), txt = service.txt.toMap())
+            val item = service.copy(type = p.service.type, hosts = service.hosts.sortedBy { ':' in it }, txt = service.txt.toMap())
             found[key] = item
             if (isWatching) watchListener?.onServiceFound(item)
             else if (targetName != null && matchesTarget(item.name)) finish()

@@ -289,12 +289,25 @@ class mDNSTest {
         assertTrue(results.single().first)
         assertTrue(results.single().second!!.message!!.contains("Timed out"))
         assertEquals(0, r.backend.multicastLocks.get())
+        repeat(2) {
+            val replacement = r.broadcast("Blocked")
+            FakeNsdBackend.await { replacement.errors.size == 1 }
+            assertTrue(replacement.errors.single().message!!.contains("Timed out"))
+        }
+        assertEquals(listOf("Svc"), r.backend.registeredNames.toList())
         r.backend.registrationListener!!.onUnregistered()
         FakeNsdBackend.await { r.backend.multicastLocks.get() == 0 }
         r.mdns.stopBroadcast { publishing, error -> results += publishing to error }
         FakeNsdBackend.await { results.size == 2 }
         assertEquals(false to null, results.last())
         assertEquals(1, r.backend.unregisterCalls.get())
+        val resumed = r.broadcast("Resumed")
+        FakeNsdBackend.await { r.backend.registeredNames.size == 2 }
+        r.backend.fireRegistered("Resumed")
+        FakeNsdBackend.await { resumed.successes.size == 1 }
+        r.backend.autoUnregister = true
+        r.mdns.stopBroadcast()
+        FakeNsdBackend.await { r.backend.multicastLocks.get() == 0 }
     }
 
     @Test
@@ -546,6 +559,25 @@ class mDNSTest {
         }
         override fun onServiceLost(service: mDNS.MdnsService) { lost += service }
         override fun onError(type: String, message: String, watching: Boolean) { errors += message to watching }
+    }
+
+    @Test
+    fun discoveryAndWatchPreferIpv4AndKeepIpv6Scope() = runBlocking {
+        val r = rig()
+        val input = listOf("fe80::1%wlan0", "192.168.1.8", "2001:db8::1")
+        val expected = listOf("192.168.1.8", "fe80::1%wlan0", "2001:db8::1")
+        r.backend.answer = { s -> mDNS.MdnsService(s.name, s.type, input, 80) }
+        FakeNsdBackend.background {
+            r.backend.awaitDiscoveryListener()
+            r.backend.fireFound("Once")
+        }
+        assertEquals(expected, discover(r, name = "Once").single().hosts)
+        val probe = WatchProbe()
+        r.mdns.watchServices(listOf("_http._tcp."), probe)
+        r.backend.fireFound("Watched")
+        FakeNsdBackend.await { probe.found.size == 1 }
+        assertEquals(expected, probe.found.single().hosts)
+        assertEquals(listOf("fe80::1%wlan0", "192.168.1.8", "2001:db8::1"), input)
     }
 
     @Test

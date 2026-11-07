@@ -52,7 +52,7 @@
     "@capacitor/ios": "^8.0.0",
     "@devioarts/capacitor-mdns": "file:..",
     "@tailwindcss/vite": "^4.3.0",
-    "bonjour-service": "^1.4.0",
+    "bonjour-service": "~1.4.0",
     "express": "^5.2.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

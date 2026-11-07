@@ -789,5 +789,5 @@ func parseHosts(_ addrs: [Data]?) -> [String] {
             }
         }
     }
-    return out
+    return out.filter { !$0.contains(":") } + out.filter { $0.contains(":") }
 }

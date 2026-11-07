@@ -50,6 +50,11 @@
   discovery does not disable multicast for the active advertisement. Failed publish/stop attempts
   release their lock reference while retaining any registration needed for late cleanup.
 - iOS IPv6 addresses with an interface scope retain it as a `%<scope-id>` suffix.
+- All platforms return IPv4 addresses before IPv6, retaining discovery order within each family.
+  Electron removes exact duplicate address strings from both discovery and watch snapshots.
+  Android retains the scope suffix provided by the OS. Electron's Bonjour library may return
+  link-local IPv6 without an interface scope; sorting does not make those addresses usable on an
+  IPv6-only network. Try suitable addresses rather than treating `hosts[0]` as a reachability guarantee.
 - On iOS a denied Local Network permission makes `discover()` report an error instead of returning an
   empty list after the timeout.
 - Android resolves discovered services one at a time before API 34 (a platform limit of
@@ -59,4 +64,17 @@
 - Ports must be integer numbers from 1 to 65535. Timeout defaults to 3000 ms; nonnumeric or non-finite values are errors, fractions are truncated and delays clamped to 0–2147483647 ms.
 - TXT publication works on all three platforms. Values must be strings. Keys must be nonempty printable ASCII without `=`, unique ignoring ASCII case. Each UTF-8 `key=value` entry fits in 255 bytes; the complete TXT record fits in 1300 bytes including the length byte for each entry (the common Android limit). Validation runs before replacing a broadcast.
 - Android cancels an unconfirmed registration immediately through its original listener; it does not wait indefinitely for a publish confirmation. Failed cancellation is retained for a stop retry.
-- Electron reports transport failure to pending publication calls and reports a name conflict if Bonjour deactivates the pending publisher. It creates the Bonjour socket only when the first network operation starts. After a fatal transport error, destroy the instance and create a new one.
+- Electron reports name conflicts immediately when Bonjour stops its probe; it does not rename the
+  service. A service stopped during its probe sends no goodbye records, so a rejected duplicate does
+  not evict the original service from other browsers. Once announcement records have been prepared,
+  stopping sends goodbye even if the send callback and `up` event have not arrived yet. Stopped
+  services ignore late announcement attempts. This behavior is tested with Bonjour 1.4.0;
+  the supported dependency range is `~1.4.0`.
+- Electron creates the Bonjour socket only when the first network operation starts. A failed response
+  to an incoming query is logged and leaves publication, discovery and watches running. Transport
+  `error` events remain fatal: they fail pending operations and stop watches. After a fatal transport
+  error, destroy the instance and create a new one.
+- On a fresh iOS installation, the Local Network prompt may outlast a discovery or publish timeout;
+  the system may also report denial before the user answers. The plugin does not distinguish a
+  pending permission prompt from explicit denial. Explain why access is needed, then allow the user
+  to retry the operation after granting it. This first-run sequence still needs physical-device testing.

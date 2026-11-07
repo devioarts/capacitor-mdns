@@ -301,15 +301,15 @@ Result of discover(). Contains normalized services and error information.
 Normalized description of a discovered Bonjour/mDNS service.
 Returned from {@link mDNSPlugin.discover}.
 
-| Prop           | Type                                        | Description                                                                 |
-| -------------- | ------------------------------------------- | --------------------------------------------------------------------------- |
-| **`name`**     | <code>string</code>                         | Instance name of the service (may be uniqued by the OS, e.g. "My App (2)"). |
-| **`type`**     | <code>string</code>                         | Full service type including the trailing dot, e.g. `"_http._tcp."`.         |
-| **`domain`**   | <code>string</code>                         | Service domain; typically `"local."`.                                       |
-| **`port`**     | <code>number</code>                         | Port the service advertises.                                                |
-| **`hosts`**    | <code>string[]</code>                       | Resolved numeric IP addresses (IPv4/IPv6).                                  |
-| **`hostname`** | <code>string</code>                         | Host name when supplied by the platform, e.g. `"my-device.local."`.         |
-| **`txt`**      | <code><a href="#mdnstxt">MdnsTxt</a></code> | TXT dictionary (key → value).                                               |
+| Prop           | Type                                        | Description                                                                           |
+| -------------- | ------------------------------------------- | ------------------------------------------------------------------------------------- |
+| **`name`**     | <code>string</code>                         | Instance name of the service (may be uniqued by the OS, e.g. "My App (2)").           |
+| **`type`**     | <code>string</code>                         | Full service type including the trailing dot, e.g. `"_http._tcp."`.                   |
+| **`domain`**   | <code>string</code>                         | Service domain; typically `"local."`.                                                 |
+| **`port`**     | <code>number</code>                         | Port the service advertises.                                                          |
+| **`hosts`**    | <code>string[]</code>                       | Resolved numeric IP addresses, IPv4 first, then IPv6 with any available scope suffix. |
+| **`hostname`** | <code>string</code>                         | Host name when supplied by the platform, e.g. `"my-device.local."`.                   |
+| **`txt`**      | <code><a href="#mdnstxt">MdnsTxt</a></code> | TXT dictionary (key → value).                                                         |
 
 
 #### MdnsDiscoverOptions

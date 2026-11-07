@@ -16,6 +16,19 @@
 
 ### Fixed
 
+- Electron: a failed response to an incoming Bonjour query no longer permanently blocks later
+  publication, discovery or watches. Fatal transport errors still stop affected operations.
+- Electron: name conflicts fail when the probe detects them, and stopping an unpublished service
+  no longer sends goodbye records for another publisher's name. Missing generated registration
+  reports the required `npx cap-electron sync` step.
+- Electron: goodbye is preserved if an announcement has started but its send callback is still pending;
+  stopped services cannot reannounce after a late callback. Duplicate discovered addresses are removed.
+- The supported `bonjour-service` range is limited to `~1.4.0` pending verification of probe cleanup
+  behavior in later minor versions; package, playground and installation instructions use the same range.
+- Discovered addresses prefer IPv4 on all platforms while preserving native IPv6 scope suffixes.
+  Added regressions for packet failures, Bonjour teardown, address ordering, native bridge input
+  validation and Android recovery after a late unregistration confirmation.
+
 - Android: NSD callbacks (delivered on NsdManager's internal thread) are now marshalled to the main thread before touching any state, removing data races between discovery results, the timeout, and publish completion. A publish confirmation racing the publish timeout can no longer complete the call twice.
 - Android: before API 34 only one `resolveService` may be active, so concurrent resolves were silently dropped and services lost. Resolves are now queued, retried on `FAILURE_ALREADY_ACTIVE`, and individually timed out.
 - Android: stopping, replacing or timing out a pending registration cancels it immediately through its listener, allowing subsequent publication. Late callbacks cannot resurrect a cancelled service. `close()` fails pending discovery.
@@ -55,7 +68,7 @@ Compared with `v0.0.3`.
 - Added an in-repository playground app that exercises broadcast, discovery, Electron bridge usage, logging, and runtime platform detection.
 - Added focused docs for platform setup, Electron setup, playground usage, and runtime behavior.
 - Added Electron end-to-end tests for publish/discover/stop behavior, platform detection, invalid input handling, and overlapping broadcast calls.
-- Added GitHub issue templates, pull request template, CI workflow, Dependabot configuration, and funding metadata.
+- Added GitHub issue templates, pull request template, CI workflow, a disabled Dependabot template, and funding metadata.
 
 ### Changed
 
