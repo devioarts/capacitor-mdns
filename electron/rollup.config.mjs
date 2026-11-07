@@ -1,4 +1,4 @@
-const external = ['bonjour-service', 'electron', 'node:events', 'node:path', 'node:url'];
+const external = ['bonjour-service', 'electron', 'node:events', 'node:net', 'node:path', 'node:url'];
 
 export default [
   {

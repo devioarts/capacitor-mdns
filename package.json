@@ -1,6 +1,6 @@
 {
   "name": "@devioarts/capacitor-mdns",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "mDNS plugin for CapacitorJS",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
@@ -32,6 +32,7 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "CHANGELOG.md",
     "android/src/main/",
     "android/build.gradle",
     "dist/",
@@ -93,7 +94,7 @@
     "@ionic/swiftlint-config": "^2.0.0",
     "@typescript-eslint/eslint-plugin": "^8.63.0",
     "@typescript-eslint/parser": "^8.63.0",
-    "bonjour-service": "^1.4.0",
+    "bonjour-service": "~1.4.0",
     "electron": "^43.0.0",
     "eslint": "^10.6.0",
     "prettier": "^3.9.0",
@@ -105,7 +106,7 @@
   },
   "peerDependencies": {
     "@capacitor/core": "^8.0.0",
-    "bonjour-service": "^1.4.0"
+    "bonjour-service": "~1.4.0"
   },
   "peerDependenciesMeta": {
     "bonjour-service": {

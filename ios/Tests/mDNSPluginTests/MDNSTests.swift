@@ -336,7 +336,7 @@ final class MDNSTests: XCTestCase {
         v6.sin6_family = sa_family_t(AF_INET6)
         inet_pton(AF_INET6, "fe80::1", &v6.sin6_addr)
 
-        let hosts = parseHosts([withUnsafeBytes(of: &v4) { Data($0) }, withUnsafeBytes(of: &v6) { Data($0) }])
+        let hosts = parseHosts([withUnsafeBytes(of: &v6) { Data($0) }, withUnsafeBytes(of: &v4) { Data($0) }])
         XCTAssertEqual(hosts, ["10.1.2.3", "fe80::1"])
         XCTAssertEqual(parseHosts(nil), [])
         XCTAssertEqual(parseHosts([]), [])

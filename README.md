@@ -3,7 +3,7 @@
 mDNS plugin for Capacitor that supports Bonjour/mDNS advertisements and discovery on iOS,
 Android, Electron, and a safe web fallback.
 
-**Supported Capacitor version: v8.**
+**Supported Capacitor version: v8. iOS 15 or later is required.**
 
 #### Supported platforms: &#x2713; iOS &#x2713; Android &#x2713; Electron &#x2713; Web fallback
 
@@ -15,6 +15,16 @@ The in-repository [`playground`](./playground) is the example app used during de
 npm install @devioarts/capacitor-mdns
 npx cap sync
 ```
+
+For Electron, also install `bonjour-service@~1.4.0` and run `npx cap-electron sync`.
+See the [Electron setup](./docs/electron.md) for details.
+
+## Upgrading from 0.1.0
+
+Version 0.2.0 retains the existing method signatures and result shapes and adds continuous
+discovery. It also tightens input validation, changes overlapping discovery and error handling,
+and raises the declared iOS minimum to 15.0. Review the
+[upgrade notes](./CHANGELOG.md#020---2026-11-07) before updating an existing application.
 
 ## Usage
 
@@ -301,15 +311,15 @@ Result of discover(). Contains normalized services and error information.
 Normalized description of a discovered Bonjour/mDNS service.
 Returned from {@link mDNSPlugin.discover}.
 
-| Prop           | Type                                        | Description                                                                 |
-| -------------- | ------------------------------------------- | --------------------------------------------------------------------------- |
-| **`name`**     | <code>string</code>                         | Instance name of the service (may be uniqued by the OS, e.g. "My App (2)"). |
-| **`type`**     | <code>string</code>                         | Full service type including the trailing dot, e.g. `"_http._tcp."`.         |
-| **`domain`**   | <code>string</code>                         | Service domain; typically `"local."`.                                       |
-| **`port`**     | <code>number</code>                         | Port the service advertises.                                                |
-| **`hosts`**    | <code>string[]</code>                       | Resolved numeric IP addresses (IPv4/IPv6).                                  |
-| **`hostname`** | <code>string</code>                         | Host name when supplied by the platform, e.g. `"my-device.local."`.         |
-| **`txt`**      | <code><a href="#mdnstxt">MdnsTxt</a></code> | TXT dictionary (key → value).                                               |
+| Prop           | Type                                        | Description                                                                           |
+| -------------- | ------------------------------------------- | ------------------------------------------------------------------------------------- |
+| **`name`**     | <code>string</code>                         | Instance name of the service (may be uniqued by the OS, e.g. "My App (2)").           |
+| **`type`**     | <code>string</code>                         | Full service type including the trailing dot, e.g. `"_http._tcp."`.                   |
+| **`domain`**   | <code>string</code>                         | Service domain; typically `"local."`.                                                 |
+| **`port`**     | <code>number</code>                         | Port the service advertises.                                                          |
+| **`hosts`**    | <code>string[]</code>                       | Resolved numeric IP addresses, IPv4 first, then IPv6 with any available scope suffix. |
+| **`hostname`** | <code>string</code>                         | Host name when supplied by the platform, e.g. `"my-device.local."`.                   |
+| **`txt`**      | <code><a href="#mdnstxt">MdnsTxt</a></code> | TXT dictionary (key → value).                                                         |
 
 
 #### MdnsDiscoverOptions

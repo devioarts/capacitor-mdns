@@ -31,6 +31,9 @@ export interface MdnsPluginPlatformResult {
  *
  * @remarks
  * - `hosts` contains resolved IPv4/IPv6 numeric addresses (no DNS names).
+ * - IPv4 addresses precede IPv6; order within each family follows discovery order.
+ * - Native IPv6 scope suffixes are preserved (`%<scope-id>` on iOS; the OS-provided scope on Android).
+ *   Electron may return link-local IPv6 without a scope; callers must not assume every address is reachable.
  * - Resolved TXT records are returned when present.
  * - `domain` is typically `"local."`.
  *
@@ -50,7 +53,7 @@ export interface MdnsService {
   port: number;
 
   /**
-   * Resolved numeric IP addresses (IPv4/IPv6).
+   * Resolved numeric IP addresses, IPv4 first, then IPv6 with any available scope suffix.
    * @example
    * `["192.168.1.42", "fe80::1234:abcd:..."]`
    */
@@ -72,6 +75,7 @@ export interface MdnsService {
  * @remarks
  * - Service types accept an optional trailing dot; results always include it.
  * - Instance `name` should be short and human-readable; the OS may append `" (n)"` to ensure uniqueness.
+ *   Electron rejects a name conflict instead of renaming the service.
  * - Advertising TXT is supported on iOS, Android and Electron. Invalid input preserves the active advertisement.
  * - Native implementations guard publish with a timeout and return `error: true` instead of
  *   leaving the Promise pending when the OS does not deliver a publish callback.

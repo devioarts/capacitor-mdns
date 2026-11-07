@@ -3,6 +3,7 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import { isAbsolute, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
+import { isIPv4 } from 'node:net';
 
 import type {
   MdnsBroadcastOptions,
@@ -57,7 +58,7 @@ interface DnsRecord {
  * Uses the `bonjour-service` package to:
  * - publish (advertise) a single service;
  * - discover services of a given type and normalize results to the shared schema;
- * - wire the API over Electron's ipcMain (see registerIpc/attachOnReady).
+ * - wire the API over Electron's ipcMain through init().
  *
  * Notes:
  * - Instance name matching is normalized and prefix-safe, mirroring iOS/Android behavior.
@@ -95,7 +96,10 @@ export class mDNS extends EventEmitter {
     return bonjour;
   }
   private get bonjour(): BonjourLike {
-    return this.bonjourInstance ?? this.attachBonjour(new Bonjour({}, (err: Error) => this.onNetworkError(err)));
+    return (
+      this.bonjourInstance ??
+      this.attachBonjour(new Bonjour({}, (err: Error) => console.warn('[mDNS] query response failed:', err)))
+    );
   }
   private trustedUrl(raw: string): boolean {
     try {
@@ -167,7 +171,7 @@ export class mDNS extends EventEmitter {
     }
     this.ipcRegistered = false;
   }
-  /** Manual IPC registration (if you set autoRegisterIpc: false). Idempotent. */
+  /** Register manual IPC handlers. Idempotent. */
   init(): void {
     this.registerIpc();
   }
@@ -402,6 +406,30 @@ export class mDNS extends EventEmitter {
             );
           };
 
+          // shortcut: Bonjour 1.4 sends goodbye for conflicting probes; remove this hook when its probe teardown is fixed.
+          const serviceRecords = svc.records;
+          let announcementStarted = svc.published === true;
+          svc.records = () => {
+            if (svc.destroyed) return [];
+            // Bonjour sets published only after the send callback, but records are already registered before it.
+            announcementStarted = true;
+            return serviceRecords.call(svc);
+          };
+          const stop = svc.stop.bind(svc);
+          svc.stop = (callback?: (error?: unknown) => void) => {
+            const announced = announcementStarted || svc.published === true;
+            const conflict = !callback && svc.activated && !announced;
+            const records = svc.records;
+            if (!announced) svc.records = () => [];
+            try {
+              stop(callback);
+              svc.destroyed = true;
+            } finally {
+              svc.records = records;
+            }
+            if (conflict) void onError(new Error('Service name is already in use on the network'));
+          };
+
           svc.once('up', onUp);
           svc.once('error', onError);
           timeout = setTimeout(onTimeout, this.publishTimeoutMs);
@@ -509,7 +537,7 @@ export class mDNS extends EventEmitter {
         const item = this.serviceResult(s, this.toFullType(type, protocol));
         if (!this.matchesTarget(item.name, targetId)) return;
         const previous = services.find((x) => x.name === item.name && x.port === item.port);
-        if (previous) Object.assign(previous, item, { hosts: [...new Set([...previous.hosts, ...item.hosts])] });
+        if (previous) Object.assign(previous, item, { hosts: this.orderHosts([...previous.hosts, ...item.hosts]) });
         else services.push(item);
         if (targetId && item.hosts.length) finish();
         else if (!item.hosts.length && item.hostname) {
@@ -528,7 +556,7 @@ export class mDNS extends EventEmitter {
               record.name.toLowerCase() === item.hostname?.toLowerCase() &&
               !item.hosts.includes(record.data)
             )
-              item.hosts.push(record.data);
+              item.hosts = this.orderHosts([...item.hosts, record.data]);
           }
         }
         if (targetId && services.some((item) => item.hosts.length)) finish();
@@ -576,6 +604,9 @@ export class mDNS extends EventEmitter {
       this.onNetworkError(new Error(this.toErr(err)));
     }
   }
+  private orderHosts(hosts: string[]): string[] {
+    return [...new Set(hosts)].sort((a, b) => Number(isIPv4(b)) - Number(isIPv4(a)));
+  }
   private serviceResult(s: Service, type: string): MdnsService {
     const suffix = `.${type}local`;
     const name = s.fqdn?.toLowerCase().endsWith(suffix.toLowerCase()) ? s.fqdn.slice(0, -suffix.length) : s.name || '';
@@ -584,7 +615,7 @@ export class mDNS extends EventEmitter {
       type,
       domain: 'local.',
       port: s.port ?? 0,
-      hosts: Array.isArray(s.addresses) ? [...s.addresses] : [],
+      hosts: this.orderHosts(Array.isArray(s.addresses) ? s.addresses : []),
       ...(s.host ? { hostname: s.host } : {}),
       ...(s.txt && Object.keys(s.txt).length ? { txt: this.normalizeTxt(s.txt) } : {}),
     };
@@ -683,7 +714,7 @@ export class mDNS extends EventEmitter {
           for (const address of addresses) {
             if (typeof address.data !== 'string') continue;
             const hosts = item.service.hosts.filter((host) => host !== address.data);
-            item.service.hosts = address.ttl ? [...hosts, address.data] : hosts;
+            item.service.hosts = this.orderHosts(address.ttl ? [...hosts, address.data] : hosts);
           }
           if (!item.announced && item.service.hosts.length) {
             item.announced = true;

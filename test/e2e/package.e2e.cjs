@@ -12,7 +12,7 @@ test('npm archive retains native sources and SwiftPM tests but excludes local au
   } finally { rmSync(cache, { recursive: true, force: true }); }
   const files = new Set(pack.files.map(file => file.path));
   assert.ok(![...files].some(path => path.startsWith('docs/audits/')));
-  for (const path of ['Package.swift', 'ios/Tests/mDNSPluginTests/MDNSTests.swift', 'android/src/main/java/com/devioarts/capacitor/mdns/MdnsValidation.kt', 'docs/runtime-behavior.md', 'electron/mdns-bridge.cjs']) assert.ok(files.has(path), path);
+  for (const path of ['CHANGELOG.md', 'Package.swift', 'ios/Tests/mDNSPluginTests/MDNSTests.swift', 'android/src/main/java/com/devioarts/capacitor/mdns/MdnsValidation.kt', 'docs/runtime-behavior.md', 'electron/mdns-bridge.cjs']) assert.ok(files.has(path), path);
   const pkg = require('../../package.json');
   assert.equal(pkg.name, '@devioarts/capacitor-mdns');
   assert.equal(pkg.peerDependencies['@capacitor/core'], '^8.0.0');

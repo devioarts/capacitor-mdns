@@ -1,5 +1,5 @@
 /**
- * Metadata consumed by the capacitor-electron runtime generator (`npm run update`).
+ * Metadata consumed by the capacitor-electron runtime generator (`npx cap-electron sync`).
  *
  * Import path for the JS layer: `@devioarts/capacitor-mdns/electron/settings`.
  */

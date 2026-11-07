@@ -20,6 +20,10 @@ The Electron runtime generator reads plugin metadata from:
 import { pluginSettings } from '@devioarts/capacitor-mdns/electron/settings';
 ```
 
+After installing or updating the plugin, run `npx cap-electron sync` in the application. If the
+generated runtime has no `mDNS` plugin, the root API rejects with an error identifying this step.
+This is a runtime setup error, before a platform implementation can return an operation result.
+
 The Electron main-process plugin class is exported from:
 
 ```ts
@@ -39,8 +43,11 @@ The Electron runtime needs `bonjour-service`. It is declared as an optional peer
 (only Electron apps need it), so install it in the Electron app:
 
 ```shell
-npm i bonjour-service@^1.4.0
+npm i bonjour-service@~1.4.0
 ```
+
+The supported range is `~1.4.0` because probe cleanup uses Bonjour 1.4 service behavior. Before widening
+it, run the real-registry regressions for conflicts, pending announcements and goodbye packets.
 
 ### Main process
 
