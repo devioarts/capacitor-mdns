@@ -21,6 +21,7 @@ internal class FakeNsdBackend(override val supportsConcurrentResolve: Boolean) :
     // Registration
     @Volatile var registrationListener: NsdBackend.RegistrationListener? = null
     val registeredNames = CopyOnWriteArrayList<String>()
+    val registeredTxt = CopyOnWriteArrayList<Map<String, String>>()
     val unregisterCalls = AtomicInteger()
     @Volatile var registerError: Throwable? = null
     @Volatile var unregisterError: Throwable? = null
@@ -68,10 +69,11 @@ internal class FakeNsdBackend(override val supportsConcurrentResolve: Boolean) :
 
     // ---- Registration --------------------------------------------------------
 
-    override fun registerService(type: String, name: String, port: Int, listener: NsdBackend.RegistrationListener): Any {
+    override fun registerService(type: String, name: String, port: Int, txt: Map<String, String>, listener: NsdBackend.RegistrationListener): Any {
         registerError?.let { throw it }
         registrationListener = listener
         registeredNames += name
+        registeredTxt.add(txt.toMap())
         return listener
     }
 

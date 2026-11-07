@@ -187,7 +187,7 @@ test('txt values are forwarded as strings and the name is trimmed', async () => 
   const fake = fakeBonjour();
   const mdns = new mDNS(fake);
   try {
-    await mdns.startBroadcast({ name: '  Padded  ', port: 80, txt: { a: '1', b: 2 } });
+    await mdns.startBroadcast({ name: '  Padded  ', port: 80, txt: { a: '1', b: '2' } });
     assert.equal(fake.published[0].opts.name, 'Padded');
     assert.deepEqual(fake.published[0].opts.txt, { a: '1', b: '2' });
   } finally {
@@ -261,13 +261,12 @@ test('discover without a target collects, de-duplicates and normalizes services'
 
     const result = await pending;
     assert.equal(result.error, false);
-    assert.equal(result.servicesFound, 3);
-    assert.deepEqual(result.services.map((s) => `${s.name}:${s.port}`), ['A:80', 'A:81', 'NoPort:0']);
+    assert.equal(result.servicesFound, 2);
+    assert.deepEqual(result.services.map((s) => `${s.name}:${s.port}`), ['A:80', 'A:81']);
     assert.deepEqual(result.services[0].txt, { k: 'v', n: '7' });
     assert.equal(result.services[0].type, '_http._tcp.');
     assert.equal(result.services[0].domain, 'local.');
     assert.deepEqual(result.services[0].hosts, ['192.168.1.2']);
-    assert.deepEqual(result.services[2].hosts, []);
     assert.equal(browser.stopCalls, 1, 'browser must be stopped when discovery ends');
   } finally {
     await mdns.destroy();
@@ -293,7 +292,7 @@ test('discover with a target filters by normalized prefix and exits early', asyn
   }
 });
 
-test('discover returns what it has, flagged as error, when the browser reports an error', async () => {
+test('discover returns an empty result on browser failure', async () => {
   const fake = fakeBonjour();
   const mdns = new mDNS(fake);
   try {
@@ -305,29 +304,20 @@ test('discover returns what it has, flagged as error, when the browser reports a
     const result = await pending;
     assert.equal(result.error, true);
     assert.equal(result.errorMessage, 'socket closed');
-    assert.equal(result.servicesFound, 1);
+    assert.equal(result.servicesFound, 0);
   } finally {
     await mdns.destroy();
   }
 });
 
-test('non-finite timeouts fall back to the default instead of ending discovery immediately', async () => {
-  for (const timeout of [Infinity, NaN, '100']) {
-    const fake = fakeBonjour();
-    const mdns = new mDNS(fake);
-    try {
-      // A targeted discovery ends early on a match, so the default (3s) never has to elapse.
-      const pending = mdns.discover({ name: 'Late', timeout });
-      await sleep(40); // the old behaviour resolved after ~1ms with nothing found
-      lastBrowser(fake).onUp(service('Late', 1));
-      const result = await pending;
-      assert.deepEqual(result.services.map((s) => s.name), ['Late'], `timeout=${String(timeout)}`);
-    } finally {
-      await mdns.destroy();
-    }
-  }
+test('non-finite and nonnumeric timeouts are rejected without starting discovery', async () => {
+  const fake = fakeBonjour();
+  const mdns = new mDNS(fake);
+  try {
+    for (const timeout of [Infinity, NaN, '100']) assert.equal((await mdns.discover({ timeout })).error, true);
+    assert.equal(fake.browsers.length, 0);
+  } finally { await mdns.destroy(); }
 });
-
 test('negative timeouts end the discovery right away', async () => {
   const mdns = new mDNS(fakeBonjour());
   try {
@@ -355,7 +345,7 @@ test('destroy() ends in-flight discoveries instead of leaving them waiting', asy
   assert.ok(Date.now() - started < 2000, 'must not wait for the 30s timeout');
   assert.equal(result.error, true);
   assert.match(result.errorMessage, /destroyed/);
-  assert.equal(result.servicesFound, 1, 'partial results are still returned');
+  assert.equal(result.servicesFound, 0, 'errors return no partial results on every platform');
   assert.equal(lastBrowser(fake).stopCalls, 1);
 });
 

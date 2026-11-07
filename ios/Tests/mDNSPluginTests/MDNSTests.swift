@@ -42,7 +42,6 @@ private final class Rig {
     var browsers: [FakeBrowser] = []
 
     init(settleMs: Int = 30, publishTimeoutMs: Int = 5000) {
-        mdns.settleDebounceMs = settleMs
         mdns.publishTimeoutMs = publishTimeoutMs
         mdns.makeBrowser = { [weak self] in
             let browser = FakeBrowser()
@@ -86,6 +85,45 @@ final class MDNSTests: XCTestCase {
         wait(for: [e], timeout: seconds + 2)
     }
 
+    func testBrowsingContinuesForTheEntireTimeoutAfterAnIdleResult() {
+        let rig = Rig()
+        var outcome: Result<[[String: Any]], Error>?
+        let done = expectation(description: "full timeout")
+        rig.discover(timeoutMs: 300) { outcome = $0; done.fulfill() }
+        rig.found("First")
+        rig.resolve(rig.services[0])
+        pause(0.15)
+        XCTAssertNil(outcome)
+        rig.found("Late")
+        rig.resolve(rig.services[1])
+        wait(for: [done], timeout: 1)
+        guard case .success(let services)? = outcome else { return XCTFail("expected success") }
+        XCTAssertEqual(services.count, 2)
+    }
+    func testNameMatchingTreatsDotsAndHyphensEqually() {
+        let rig = Rig()
+        var outcome: Result<[[String: Any]], Error>?
+        rig.discover(name: "My-Device") { outcome = $0 }
+        rig.found("My.Device")
+        rig.resolve(rig.services[0])
+        guard case .success(let services)? = outcome else { return XCTFail("expected early match") }
+        XCTAssertEqual(services.first?["name"] as? String, "My.Device")
+    }
+    func testValidationEnforcesDnsAndUtf8LimitsWithoutStoppingPublisher() {
+        let rig = Rig()
+        rig.mdns.broadcast(type: "_http._tcp.", name: "Good", port: 80, txt: nil) { _ in }
+        for type in ["_123._tcp.", "_ab--cd._tcp.", "_abcdefghijklmnop._tcp.", "http"] {
+            XCTAssertThrowsError(try MDNS.validatedType(type))
+        }
+        XCTAssertEqual(try? MDNS.validatedType(" _HTTP._TCP "), "_http._tcp.")
+        XCTAssertThrowsError(try MDNS.validatedName(String(repeating: "é", count: 32)))
+        for txt in [["": "x"], ["a=b": "x"], ["a": String(repeating: "é", count: 127)], ["A": "", "a": ""], Dictionary(uniqueKeysWithValues: (0..<6).map { ("k\($0)", String(repeating: "x", count: 250)) })] {
+            rig.mdns.broadcast(type: "_http._tcp.", name: "Bad", port: 81, txt: txt) { result in
+                guard case .failure = result else { return XCTFail("invalid TXT accepted") }
+            }
+            XCTAssertEqual(rig.services[0].stopCalls, 0)
+        }
+    }
     // MARK: Discovery
 
     func testSlowResolveDoesNotFinishBeforeTheServiceIsResolved() {
@@ -122,15 +160,15 @@ final class MDNSTests: XCTestCase {
         XCTAssertEqual(rig.services[0].resolveCalls, 1)
     }
 
-    func testResolvedServiceWithoutAddressesReturnsEmptyHosts() {
+    func testResolvedServiceWithoutAddressesKeepsWaitingForAddresses() {
         let rig = Rig()
         let done = expectation(description: "discovery")
-        rig.discover(name: "A") { outcome in
+        rig.discover(name: "A", timeoutMs: 80) { outcome in
             guard case .success(let services) = outcome else {
                 done.fulfill()
                 return XCTFail("expected success")
             }
-            XCTAssertEqual(services.first?["hosts"] as? [String], [])
+            XCTAssertTrue(services.isEmpty)
             done.fulfill()
         }
         rig.found("A")
@@ -334,9 +372,9 @@ extension MDNSTests {
         rig.mdns.netServiceBrowser(browser, didFind: found, moreComing: false)
         rig.mdns.netServiceBrowser(browser, didFind: found, moreComing: false)
         XCTAssertEqual(rig.services.count, 1)
-        rig.mdns.netServiceDidResolveAddress(rig.services[0])
+        rig.resolve(rig.services[0])
         XCTAssertEqual(probe.found.count, 1)
-        XCTAssertEqual(probe.found[0]["hosts"] as? [String], [])
+        XCTAssertEqual(probe.found[0]["hosts"] as? [String], ["192.168.1.5"])
         rig.mdns.netServiceBrowser(browser, didRemove: found, moreComing: false)
         XCTAssertEqual(probe.lost.count, 1)
         XCTAssertEqual(probe.lost[0] as NSDictionary, probe.found[0] as NSDictionary)
@@ -402,7 +440,7 @@ extension MDNSTests {
         let probe = WatchProbe()
         watch(rig, probe)
         var discovery: Result<[[String: Any]], Error>?
-        rig.discover { discovery = $0 }
+        rig.discover(name: "Once") { discovery = $0 }
         rig.found("Once")
         rig.mdns.handleWatchFound(name: "Watched", type: "_http._tcp.", domain: "local.")
         rig.resolve(rig.services[1])

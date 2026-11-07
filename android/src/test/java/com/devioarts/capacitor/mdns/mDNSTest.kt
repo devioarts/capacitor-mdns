@@ -50,6 +50,68 @@ class mDNSTest {
         withTimeout(10_000) { r.mdns.discover("_http._tcp", name, timeoutMs) }
     }
 
+    @Test
+    fun discover_replacesPreviousRequestWithoutWaitingForItsTimeout() = runBlocking {
+        val r = rig()
+        val first = async(r.main.dispatcher) { runCatching { r.mdns.discover("_http._tcp.", timeoutMs = 10000) } }
+        FakeNsdBackend.await { r.backend.discoveryListener != null }
+        val second = async(r.main.dispatcher) { r.mdns.discover("_ipp._tcp.", timeoutMs = 30) }
+        assertTrue(first.await().exceptionOrNull()!!.message!!.contains("replaced"))
+        assertTrue(second.await().isEmpty())
+    }
+    @Test
+    fun broadcast_timeoutCanBeFollowedByAnotherPublication() {
+        val r = rig(publishTimeoutMs = 40)
+        val first = r.broadcast("A")
+        FakeNsdBackend.await { first.errors.size == 1 && r.backend.unregisterCalls.get() == 1 }
+        val second = r.broadcast("B")
+        FakeNsdBackend.await { r.backend.registeredNames.size == 2 }
+        r.backend.fireRegistered("B")
+        FakeNsdBackend.await { second.successes.size == 1 }
+    }
+    @Test
+    fun validation_enforcesDnsAndUtf8Limits() {
+        for (type in listOf("_123._tcp.", "_ab--cd._tcp.", "_abcdefghijklmnop._tcp.", "http")) {
+            assertTrue(runCatching { MdnsValidation.type(type) }.isFailure)
+        }
+        assertEquals("_http._tcp.", MdnsValidation.type(" _HTTP._TCP "))
+        assertTrue(runCatching { MdnsValidation.name("é".repeat(32)) }.isFailure)
+        for (txt in listOf(mapOf("" to "x"), mapOf("a=b" to "x"), mapOf("a" to "é".repeat(127)), mapOf("A" to "", "a" to ""), (0 until 6).associate { "k$it" to "x".repeat(250) })) {
+            assertTrue(runCatching { MdnsValidation.txt(txt) }.isFailure)
+        }
+        MdnsValidation.txt(mapOf("a" to "é".repeat(126)))
+    }
+    @Test
+    fun discover_replacementWaitsForUncancellableLegacyResolver() = runBlocking {
+        val r = rig(concurrentResolve = false)
+        r.backend.resolveDelayMs = 700
+        val first = async(r.main.dispatcher) { runCatching { r.mdns.discover("_http._tcp.", timeoutMs = 3000) } }
+        FakeNsdBackend.await { r.backend.discoveryListener != null }
+        r.backend.discoveryListeners.getValue("_http._tcp.").onFound(DiscoveredService("Old", "_http._tcp."))
+        FakeNsdBackend.await { r.backend.resolveCalls.size == 1 }
+        val second = async(r.main.dispatcher) { r.mdns.discover("_ipp._tcp.", "New", 2500) }
+        FakeNsdBackend.await { r.backend.discoveryListeners.containsKey("_ipp._tcp.") }
+        r.backend.discoveryListeners.getValue("_ipp._tcp.").onFound(DiscoveredService("New", "_ipp._tcp."))
+        assertTrue(first.await().isFailure)
+        assertEquals(listOf("New"), second.await().map { it.name })
+        assertEquals(0, r.backend.alreadyActiveFailures.get())
+    }
+    @Test
+    fun broadcast_forwardsUtf8TxtToTheBackend() {
+        val r = rig()
+        r.mdns.broadcast("_http._tcp.", "WithTxt", 80, {}, {}, txt = mapOf("role" to "tiskárna"))
+        r.backend.awaitRegistrationListener()
+        assertEquals(mapOf("role" to "tiskárna"), r.backend.registeredTxt.single())
+    }
+    @Test
+    fun discover_matchesDotsAndHyphensButReturnsAdvertisedName() {
+        val r = rig()
+        FakeNsdBackend.background {
+            r.backend.awaitDiscoveryListener()
+            r.backend.fireFound("My.Device")
+        }
+        assertEquals(listOf("My.Device"), discover(r, "My-Device").map { it.name })
+    }
     // ---- broadcast -----------------------------------------------------------
 
     @Test
@@ -105,7 +167,7 @@ class mDNSTest {
         val probe = r.broadcast()
         FakeNsdBackend.await { probe.errors.size == 1 }
         assertTrue(probe.errors.single().message!!.contains("Timed out"))
-        assertEquals(0, r.backend.unregisterCalls.get())
+        FakeNsdBackend.await { r.backend.unregisterCalls.get() == 1 }
 
         // The OS confirms after we already told JS it failed: the service must not stay advertised.
         r.backend.fireRegistered("Svc")
@@ -125,14 +187,14 @@ class mDNSTest {
     }
 
     @Test
-    fun stopBroadcast_beforeConfirmationDefersUnregisterUntilTheOsConfirms() {
+    fun stopBroadcast_beforeConfirmationCancelsThePendingRequest() {
         val r = rig()
         val probe = r.broadcast()
         r.backend.awaitRegistrationListener()
 
         r.mdns.stopBroadcast()
         FakeNsdBackend.await { probe.errors.size == 1 }
-        assertEquals("unregistering an unconfirmed registration is unsafe", 0, r.backend.unregisterCalls.get())
+        FakeNsdBackend.await { r.backend.unregisterCalls.get() == 1 }
 
         r.backend.fireRegistered("Svc")
         FakeNsdBackend.await { r.backend.unregisterCalls.get() == 1 }
@@ -241,10 +303,10 @@ class mDNSTest {
         val first = r.broadcast("A")
         r.backend.awaitRegistrationListener()
         val old = r.backend.registrationListener!!
+        r.backend.autoUnregister = false
         val second = r.broadcast("B")
         FakeNsdBackend.await { first.errors.size == 1 }
         assertEquals(listOf("A"), r.backend.registeredNames.toList())
-        r.backend.autoUnregister = false
         old.onRegistered("A")
         FakeNsdBackend.await { r.backend.unregisterCalls.get() == 1 }
         assertEquals(listOf("A"), r.backend.registeredNames.toList())
@@ -301,12 +363,13 @@ class mDNSTest {
         val probe = r.broadcast()
         r.backend.awaitRegistrationListener()
         val results = CopyOnWriteArrayList<Pair<Boolean, Throwable?>>()
+        r.backend.autoUnregister = false
         r.mdns.stopBroadcast { publishing, error -> results += publishing to error }
         FakeNsdBackend.await { results.size == 1 }
         assertTrue(results.single().first)
         assertTrue(results.single().second!!.message!!.contains("Timed out"))
         assertEquals(1, probe.errors.size)
-        assertEquals(0, r.backend.unregisterCalls.get())
+        assertEquals(1, r.backend.unregisterCalls.get())
         assertEquals(0, r.backend.multicastLocks.get())
         r.backend.fireRegistered("Svc")
         FakeNsdBackend.await { r.backend.unregisterCalls.get() == 1 }
@@ -490,14 +553,14 @@ class mDNSTest {
         val r = rig()
         val probe = WatchProbe()
         assertEquals(2, r.mdns.watchServices(listOf(" _http._tcp", "_http._tcp.", "_ipp._tcp."), probe))
-        r.backend.answer = { s -> mDNS.MdnsService(s.name, s.type, emptyList(), 80, mapOf("role" to "test")) }
+        r.backend.answer = { s -> mDNS.MdnsService(s.name, s.type, listOf("192.168.1.5"), 80, mapOf("role" to "test")) }
         val listener = r.backend.discoveryListeners.getValue("_http._tcp.")
         FakeNsdBackend.background { repeat(3) { listener.onFound(DiscoveredService("A", "_http._tcp")) } }
         FakeNsdBackend.await { probe.found.size == 1 }
         FakeNsdBackend.background { listener.onLost(DiscoveredService("A", "_http._tcp")) }
         FakeNsdBackend.await { probe.lost.size == 1 }
         assertEquals(probe.found.single(), probe.lost.single())
-        assertEquals(emptyList<String>(), probe.lost.single().hosts)
+        assertEquals(listOf("192.168.1.5"), probe.lost.single().hosts)
         assertEquals(mapOf("role" to "test"), probe.lost.single().txt)
         assertEquals(1, r.backend.multicastLocks.get())
         assertEquals(null, r.mdns.stopWatching())
@@ -652,7 +715,7 @@ class mDNSTest {
         r.backend.resolveListeners[0].onResolved(mDNS.MdnsService("Stale", "_http._tcp.", emptyList(), 1))
         Thread.sleep(10)
         assertTrue(probe.found.isEmpty())
-        r.backend.resolveListeners[1].onResolved(mDNS.MdnsService("A", "_http._tcp.", emptyList(), 80))
+        r.backend.resolveListeners[1].onResolved(mDNS.MdnsService("A", "_http._tcp.", listOf("192.168.1.5"), 80))
         FakeNsdBackend.await { probe.found.size == 1 }
         assertEquals("A", probe.found.single().name)
     }

@@ -14,14 +14,14 @@ module.exports.createMDNSAPI = ({ ipcRenderer }) => {
 
     /**
      * Start advertising a Bonjour/mDNS service.
-     * @param {{type?: string, name: string, port: number, txt?: Record<string,string>}} options
+     * @param {{type?: string, name?: string, port: number, txt?: Record<string,string>}} options
      * @returns {Promise<{publishing: boolean, name: string, error: boolean, errorMessage: string|null}>}
      */
     startBroadcast: (options) => ipcRenderer.invoke('mdns:startBroadcast', options),
 
     /**
      * Stop advertising (no-op if not running).
-     * @returns {Promise<{publishing: boolean}>}
+     * @returns {Promise<{publishing: boolean, error: boolean, errorMessage: string|null}>}
      */
     stopBroadcast: () => ipcRenderer.invoke('mdns:stopBroadcast'),
 

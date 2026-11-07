@@ -1,5 +1,7 @@
 import Bonjour from 'bonjour-service';
-import { BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
+import { isAbsolute, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 
 import type {
@@ -26,6 +28,8 @@ export interface MdnsOptions {
   publishTimeoutMs?: number;
   /** Max time to wait for a service to stop (default 3000). */
   stopTimeoutMs?: number;
+  /** Exact renderer origins allowed in addition to packaged app URLs (e.g. your dev server). */
+  trustedOrigins?: string[];
 }
 
 const DEFAULT_DISCOVER_TIMEOUT_MS = 3000;
@@ -35,7 +39,7 @@ const MAX_TIMER_MS = 2_147_483_647;
 interface Watch {
   types: string[];
   browsers: Browser[];
-  services: Map<string, { service: MdnsService; fqdn: string; expires: number }>;
+  services: Map<string, { service: MdnsService; fqdn: string; expires: number; announced: boolean }>;
   timer?: NodeJS.Timeout;
   onResponse?: (packet: { answers?: DnsRecord[]; additionals?: DnsRecord[] }) => void;
 }
@@ -66,8 +70,10 @@ export class mDNS extends EventEmitter {
   private destroyed = false;
   /** Settle callbacks of in-flight discoveries, so destroy() can end them instead of leaving them waiting. */
   private readonly activeDiscoveries = new Set<(abortMessage?: string) => void>();
-  private readonly bonjour: BonjourLike;
-  private readonly transport?: EventEmitter;
+  private bonjourInstance?: BonjourLike;
+  private transport?: EventEmitter & { query?: (name: string, type: string) => void };
+  private readonly trustedOrigins: Set<string>;
+  private pendingPublishError?: (error: Error) => void;
   private watch?: Watch;
   private networkError?: string;
   private readonly stoppedBrowsers = new Set<Browser>();
@@ -75,14 +81,49 @@ export class mDNS extends EventEmitter {
 
   constructor(bonjour?: BonjourLike, options: MdnsOptions = {}) {
     super();
-    this.bonjour = bonjour ?? new Bonjour({}, (err: Error) => this.onNetworkError(err));
-    // shortcut: Bonjour 1.4 needs its internal transport for errors/TTL; recheck these tests on dependency upgrades.
-    this.transport = (this.bonjour as unknown as { server?: { mdns: EventEmitter } }).server?.mdns;
-    this.transport?.on('error', this.onNetworkError);
+    this.trustedOrigins = new Set(options.trustedOrigins ?? []);
+    if (bonjour) this.attachBonjour(bonjour);
     this.publishTimeoutMs = options.publishTimeoutMs ?? 5000;
     this.stopTimeoutMs = options.stopTimeoutMs ?? 3000;
   }
 
+  private attachBonjour(bonjour: BonjourLike): BonjourLike {
+    this.bonjourInstance = bonjour;
+    // shortcut: Bonjour 1.4 needs its internal transport for errors/TTL; recheck these tests on dependency upgrades.
+    this.transport = (bonjour as unknown as { server?: { mdns: EventEmitter } }).server?.mdns;
+    this.transport?.on('error', this.onNetworkError);
+    return bonjour;
+  }
+  private get bonjour(): BonjourLike {
+    return this.bonjourInstance ?? this.attachBonjour(new Bonjour({}, (err: Error) => this.onNetworkError(err)));
+  }
+  private trustedUrl(raw: string): boolean {
+    try {
+      const url = new URL(raw);
+      // Capacitor Electron's default dev renderer; packaged apps require an explicit origin.
+      if (app?.isPackaged === false && `${url.protocol}//${url.host}` === 'http://localhost:5173') return true;
+      if (
+        url.protocol === 'capacitor-electron:' &&
+        url.hostname === 'localhost' &&
+        !url.username &&
+        !url.password &&
+        !url.port
+      )
+        return true;
+      if (url.protocol === 'file:') {
+        const path = relative(app.getAppPath(), fileURLToPath(url));
+        return path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+      }
+      return this.trustedOrigins.has(`${url.protocol}//${url.host}`);
+    } catch {
+      return false;
+    }
+  }
+  private trustedSender(event: Electron.IpcMainInvokeEvent): boolean {
+    return (
+      !!event.senderFrame && event.senderFrame === event.sender.mainFrame && this.trustedUrl(event.senderFrame.url)
+    );
+  }
   //<editor-fold desc="Init/Destroy">
   private ipcRegistered = false;
   private registerIpc(): void {
@@ -97,12 +138,18 @@ export class mDNS extends EventEmitter {
     } catch {
       /* ignore */
     }
-    ipcMain.handle('mdns:startBroadcast', (_evt, o: MdnsBroadcastOptions) => this.startBroadcast(o));
-    ipcMain.handle('mdns:stopBroadcast', () => this.stopBroadcast());
-    ipcMain.handle('mdns:discover', (_evt, o: MdnsDiscoverOptions) => this.discover(o));
-    ipcMain.handle('mdns:getPluginPlatform', () => this.getPluginPlatform());
-    ipcMain.handle('mdns:watchServices', (_evt, o: MdnsWatchOptions) => this.watchServices(o));
-    ipcMain.handle('mdns:stopWatching', () => this.stopWatching());
+    const handle = (channel: string, action: (options: any) => unknown) => {
+      ipcMain.handle(channel, (event, options) => {
+        if (!this.trustedSender(event)) throw new Error('Untrusted mDNS IPC sender');
+        return action(options);
+      });
+    };
+    handle('mdns:startBroadcast', (o) => this.startBroadcast(o));
+    handle('mdns:stopBroadcast', () => this.stopBroadcast());
+    handle('mdns:discover', (o) => this.discover(o));
+    handle('mdns:getPluginPlatform', () => this.getPluginPlatform());
+    handle('mdns:watchServices', (o) => this.watchServices(o));
+    handle('mdns:stopWatching', () => this.stopWatching());
     this.ipcRegistered = true;
   }
 
@@ -127,13 +174,14 @@ export class mDNS extends EventEmitter {
 
   async destroy(): Promise<void> {
     this.destroyed = true;
+    this.pendingPublishError?.(new Error('mDNS instance destroyed during publish'));
     await this.stopWatching();
     this.unregisterIpc();
     for (const abort of [...this.activeDiscoveries]) abort('mDNS instance destroyed during discovery');
     await this.withBroadcastLock(async () => {
       await this.stopBroadcastUnlocked();
       try {
-        this.bonjour.destroy();
+        this.bonjourInstance?.destroy();
         this.transport?.removeListener('error', this.onNetworkError);
         this.advertiser = undefined;
       } catch (err) {
@@ -166,7 +214,7 @@ export class mDNS extends EventEmitter {
   }
 
   private normalize(name: string): string {
-    return name.replace(/ \(\d+\)$/, '');
+    return name.replace(/ \(\d+\)$/, '').replace(/\./g, '-');
   }
   private matchesTarget(candidate: string, target?: string | null): boolean {
     if (!target) return true;
@@ -179,27 +227,49 @@ export class mDNS extends EventEmitter {
    * anything malformed is rejected (null) rather than silently advertised as something else.
    */
   private parseType(typeWithDot?: unknown): { type: string; protocol: 'tcp' | 'udp' } | null {
+    if (typeWithDot != null && typeof typeWithDot !== 'string') return null;
     const raw = typeof typeWithDot === 'string' && typeWithDot.trim() ? typeWithDot.trim() : '_http._tcp.';
-    const m = /^_([^.]+)\._(tcp|udp)$/.exec(raw.replace(/\.$/, ''));
-    return m ? { type: m[1], protocol: m[2] as 'tcp' | 'udp' } : null;
+    const m = /^_([a-z0-9](?:[a-z0-9-]{0,13}[a-z0-9])?)\._(tcp|udp)\.?$/i.exec(raw);
+    return m && /[a-z]/i.test(m[1]) && !m[1].includes('--')
+      ? { type: m[1].toLowerCase(), protocol: m[2].toLowerCase() as 'tcp' | 'udp' }
+      : null;
   }
+  private validateName(name: unknown): string | null {
+    return name != null &&
+      (typeof name !== 'string' || Buffer.byteLength(name.trim(), 'utf8') > 63 || /[\x00-\x1f\x7f]/.test(name))
+      ? 'Invalid instance name (maximum 63 UTF-8 bytes, no control characters)'
+      : null;
+  }
+  private validateTxt(txt: unknown): string | null {
+    if (txt == null) return null;
+    if (!this.isRecord(txt)) return 'TXT must be an object of strings';
+    const keys = new Set<string>();
+    let totalBytes = 0;
+    for (const [key, value] of Object.entries(txt)) {
+      if (!/^[\x20-\x7e]+$/.test(key) || key.includes('=') || keys.has(key.toLowerCase()))
+        return 'Invalid or duplicate TXT key';
+      if (typeof value !== 'string' || Buffer.byteLength(`${key}=${value}`, 'utf8') > 255)
+        return 'TXT entries must be strings of at most 255 UTF-8 bytes including key=';
+      totalBytes += Buffer.byteLength(`${key}=${value}`, 'utf8') + 1;
+      if (totalBytes > 1300) return 'TXT record must fit in 1300 bytes including length prefixes';
+      keys.add(key.toLowerCase());
+    }
+    return null;
+  }
+
   private invalidTypeMessage(typeWithDot: unknown): string {
     return `Invalid service type: ${String(typeWithDot)} (expected e.g. "_http._tcp.")`;
   }
   private normalizeTimeout(value: unknown): number {
     if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_DISCOVER_TIMEOUT_MS;
-    return Math.min(Math.max(0, value), MAX_TIMER_MS);
+    return Math.min(Math.max(0, Math.trunc(value)), MAX_TIMER_MS);
   }
   private toFullType(type: string, protocol: 'tcp' | 'udp'): string {
     return `_${type}._${protocol}.`;
   }
 
-  private hasCbStop(x: unknown): x is { stop: (cb?: () => void) => void } {
-    return !!x && typeof (x as any).stop === 'function';
-  }
   private async safeStopService(svc: Service | undefined): Promise<void> {
     if (!svc) return;
-    if (!this.hasCbStop(svc)) throw new Error('Service does not support stop');
     await new Promise<void>((res, reject) => {
       let settled = false;
       const done = (error?: unknown) => {
@@ -245,8 +315,9 @@ export class mDNS extends EventEmitter {
   async startBroadcast(options: MdnsBroadcastOptions): Promise<MdnsBroadcastResult> {
     return this.withBroadcastLock(async () => {
       const safeOptions = (options ?? {}) as Partial<MdnsBroadcastOptions>;
-      const portError = this.validatePort(safeOptions.port);
-      if (portError) return { publishing: false, name: '', error: true, errorMessage: portError };
+      const portError =
+        this.validatePort(safeOptions.port) ?? this.validateName(safeOptions.name) ?? this.validateTxt(safeOptions.txt);
+      if (portError) return { publishing: !!this.advertiser, name: '', error: true, errorMessage: portError };
       if (this.destroyed)
         return { publishing: false, name: '', error: true, errorMessage: 'mDNS instance is destroyed' };
       if (this.networkError)
@@ -255,7 +326,7 @@ export class mDNS extends EventEmitter {
       const parsed = this.parseType(safeOptions.type);
       if (!parsed) {
         return {
-          publishing: false,
+          publishing: !!this.advertiser,
           name: '',
           error: true,
           errorMessage: this.invalidTypeMessage(safeOptions.type),
@@ -277,6 +348,7 @@ export class mDNS extends EventEmitter {
               clearTimeout(timeout);
               timeout = null;
             }
+            this.pendingPublishError = undefined;
             resolve(r);
           }
         };
@@ -302,6 +374,7 @@ export class mDNS extends EventEmitter {
             }
           };
           const onUp = () => {
+            if (failing || settled) return;
             cleanupListeners();
             safeResolve({ publishing: true, name: svc.name || '', error: false, errorMessage: null });
           };
@@ -320,13 +393,23 @@ export class mDNS extends EventEmitter {
             });
           };
           const onTimeout = () => {
-            void onError(new Error(`Timed out waiting for service publish after ${this.publishTimeoutMs}ms`));
+            void onError(
+              new Error(
+                svc.activated === false
+                  ? 'Service name is already in use on the network'
+                  : `Timed out waiting for service publish after ${this.publishTimeoutMs}ms`,
+              ),
+            );
           };
 
           svc.once('up', onUp);
           svc.once('error', onError);
           timeout = setTimeout(onTimeout, this.publishTimeoutMs);
           this.advertiser = svc;
+          this.pendingPublishError = (error) => {
+            void onError(error);
+          };
+          if (this.networkError) this.pendingPublishError(new Error(this.networkError));
         } catch (e) {
           safeResolve({ publishing: false, name: '', error: true, errorMessage: this.toErr(e) });
         }
@@ -376,8 +459,15 @@ export class mDNS extends EventEmitter {
         services: [],
       };
     }
+    const inputError =
+      this.validateName(safeOptions.name) ??
+      (safeOptions.timeout != null && (typeof safeOptions.timeout !== 'number' || !Number.isFinite(safeOptions.timeout))
+        ? 'Invalid timeout'
+        : null);
+    if (inputError) return { error: true, errorMessage: inputError, servicesFound: 0, services: [] };
+    for (const abort of [...this.activeDiscoveries]) abort('Discovery replaced by a new request');
     const { type, protocol } = parsed;
-    const targetId = typeof safeOptions.name === 'string' && safeOptions.name ? safeOptions.name : null;
+    const targetId = typeof safeOptions.name === 'string' && safeOptions.name.trim() ? safeOptions.name.trim() : null;
     const timeoutMs = this.normalizeTimeout(safeOptions.timeout);
 
     let browser: Browser | null = null;
@@ -393,6 +483,7 @@ export class mDNS extends EventEmitter {
         if (settled) return;
         settled = true;
         this.activeDiscoveries.delete(finish);
+        this.transport?.removeListener('response', onResponse);
         if (abortMessage) {
           hadError = true;
           errMsg = abortMessage;
@@ -408,28 +499,59 @@ export class mDNS extends EventEmitter {
         resolve({
           error: hadError,
           errorMessage: errMsg,
-          services,
-          servicesFound: services.length,
+          services: hadError ? [] : services.filter((s) => s.hosts.length > 0),
+          servicesFound: hadError ? 0 : services.filter((s) => s.hosts.length > 0).length,
         });
       };
 
+      const up = (s: Service) => {
+        if (settled) return;
+        const item = this.serviceResult(s, this.toFullType(type, protocol));
+        if (!this.matchesTarget(item.name, targetId)) return;
+        const previous = services.find((x) => x.name === item.name && x.port === item.port);
+        if (previous) Object.assign(previous, item, { hosts: [...new Set([...previous.hosts, ...item.hosts])] });
+        else services.push(item);
+        if (targetId && item.hosts.length) finish();
+        else if (!item.hosts.length && item.hostname) {
+          this.queryAddresses(item.hostname);
+        }
+      };
+      const onResponse = (packet: { answers?: DnsRecord[]; additionals?: DnsRecord[] }) => {
+        if (settled) return;
+        const records = [...(packet.answers ?? []), ...(packet.additionals ?? [])];
+        for (const item of services) {
+          for (const record of records) {
+            if (
+              (record.type === 'A' || record.type === 'AAAA') &&
+              record.ttl &&
+              typeof record.data === 'string' &&
+              record.name.toLowerCase() === item.hostname?.toLowerCase() &&
+              !item.hosts.includes(record.data)
+            )
+              item.hosts.push(record.data);
+          }
+        }
+        if (targetId && services.some((item) => item.hosts.length)) finish();
+      };
       this.activeDiscoveries.add(finish);
       try {
-        browser = this.bonjour.find({ type, protocol }, (s) => {
-          if (settled) return; // a late event must not mutate an already returned result
-          const item = this.serviceResult(s, this.toFullType(type, protocol));
-          if (!this.matchesTarget(item.name, targetId)) return;
-          const key = `${item.name}:${item.port}`;
-          if (!services.some((x) => `${x.name}:${x.port}` === key)) services.push(item);
-          if (targetId && this.matchesTarget(item.name, targetId)) finish();
-        });
-
+        const bonjour = this.bonjour;
+        if (settled) return;
+        this.transport?.on('response', onResponse);
+        browser = bonjour.find({ type, protocol }, up);
+        if (settled) {
+          this.safeStopBrowser(browser);
+          browser = null;
+          return;
+        }
+        browser.on('srv-update', up);
+        browser.on('txt-update', up);
         // Record error and let the timeout conclude; results will still be returned.
         const onBrowserError = (err: unknown) => {
           hadError = true;
           errMsg = this.toErr(err);
         };
-        (browser as any).on('error', onBrowserError);
+        (browser as EventEmitter).on('error', onBrowserError);
 
         timer = setTimeout(() => finish(), timeoutMs);
       } catch (err) {
@@ -446,6 +568,14 @@ export class mDNS extends EventEmitter {
     );
   }
 
+  private queryAddresses(hostname: string): void {
+    try {
+      this.transport?.query?.(hostname, 'A');
+      this.transport?.query?.(hostname, 'AAAA');
+    } catch (err) {
+      this.onNetworkError(new Error(this.toErr(err)));
+    }
+  }
   private serviceResult(s: Service, type: string): MdnsService {
     const suffix = `.${type}local`;
     const name = s.fqdn?.toLowerCase().endsWith(suffix.toLowerCase()) ? s.fqdn.slice(0, -suffix.length) : s.name || '';
@@ -463,7 +593,7 @@ export class mDNS extends EventEmitter {
   private notify(event: string, data: unknown): void {
     this.emit(event, data);
     for (const win of BrowserWindow?.getAllWindows() ?? []) {
-      if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+      if (!win.isDestroyed() && !win.webContents.isDestroyed() && this.trustedUrl(win.webContents.getURL())) {
         win.webContents.send(`event-mDNS-${event}`, data);
         win.webContents.send(`mdns:event:${event}`, data);
       }
@@ -472,6 +602,7 @@ export class mDNS extends EventEmitter {
 
   private readonly onNetworkError = (err: Error): void => {
     this.networkError = this.toErr(err);
+    this.pendingPublishError?.(err);
     const type = this.watch?.types[0] ?? '';
     const watching = !!this.watch;
     void this.stopWatching();
@@ -494,6 +625,8 @@ export class mDNS extends EventEmitter {
     }
     const cleanup = this.stopWatch();
     if (cleanup) return failed(cleanup);
+    const bonjour = this.bonjour;
+    if (this.networkError) return failed(this.networkError);
     const watch: Watch = { types: [...types.keys()], browsers: [], services: new Map() };
     this.watch = watch;
     const addBrowser = (type: string, parsed: { type: string; protocol: 'tcp' | 'udp' }) => {
@@ -505,21 +638,23 @@ export class mDNS extends EventEmitter {
         const previous = watch.services.get(key);
         if (!service.hosts.length && previous?.service.hostname === service.hostname)
           service.hosts = [...(previous?.service.hosts ?? [])];
-        const isNew = !watch.services.has(key);
+        const isNew = !previous?.announced && service.hosts.length > 0;
         watch.services.set(key, {
           service,
           fqdn: s.fqdn || `${service.name}.${type}local`,
           expires: s.ttl ? Date.now() + s.ttl * 1000 : Infinity,
+          announced: !!previous?.announced || isNew,
         });
+        if (!service.hosts.length && service.hostname) this.queryAddresses(service.hostname);
         if (isNew) this.notify('serviceFound', { service: structuredClone(service) });
       };
-      const browser = this.bonjour.find(parsed, up);
+      const browser = bonjour.find(parsed, up);
       browser.on('down', (s: Service) => {
         if (this.watch !== watch || !active) return;
         const key = `${type}|${this.serviceResult(s, type).name}`;
         const previous = watch.services.get(key);
         watch.services.delete(key);
-        if (previous) this.notify('serviceLost', { service: structuredClone(previous.service) });
+        if (previous?.announced) this.notify('serviceLost', { service: structuredClone(previous.service) });
       });
       browser.on('srv-update', up);
       browser.on('txt-update', up);
@@ -550,6 +685,11 @@ export class mDNS extends EventEmitter {
             const hosts = item.service.hosts.filter((host) => host !== address.data);
             item.service.hosts = address.ttl ? [...hosts, address.data] : hosts;
           }
+          if (!item.announced && item.service.hosts.length) {
+            item.announced = true;
+            this.notify('serviceFound', { service: structuredClone(item.service) });
+            if (this.watch !== watch) return;
+          }
         }
       };
       this.transport?.on('response', watch.onResponse);
@@ -560,7 +700,7 @@ export class mDNS extends EventEmitter {
           const expired = [...watch.services.entries()].filter(([, item]) => item.expires <= Date.now());
           for (const [key, item] of expired) {
             watch.services.delete(key);
-            this.notify('serviceLost', { service: structuredClone(item.service) });
+            if (item.announced) this.notify('serviceLost', { service: structuredClone(item.service) });
             if (this.watch !== watch) return;
           }
           // A fresh Browser forgets expired entries retained by bonjour-service's internal cache.

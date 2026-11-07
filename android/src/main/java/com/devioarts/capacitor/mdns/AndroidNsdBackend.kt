@@ -53,12 +53,14 @@ internal class AndroidNsdBackend(context: Context) : NsdBackend {
         type: String,
         name: String,
         port: Int,
+        txt: Map<String, String>,
         listener: NsdBackend.RegistrationListener
     ): Any {
         val info = NsdServiceInfo().apply {
             serviceType = type
             serviceName = name
             setPort(port)
+            txt.forEach { (key, value) -> setAttribute(key, value) }
         }
         val nsdListener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(nsi: NsdServiceInfo) = listener.onRegistered(nsi.serviceName)

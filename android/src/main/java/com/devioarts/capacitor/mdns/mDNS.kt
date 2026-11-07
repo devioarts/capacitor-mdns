@@ -78,8 +78,7 @@ class mDNS internal constructor(
         var timeoutJob: Job? = null
         var token: Any? = null
         var completed = false
-        /** True once the OS confirmed the registration (so it can be unregistered safely). */
-        var registered = false
+        var finished = false
         /** True once the caller no longer wants it; a late confirmation must be unregistered. */
         var cancelled = false
         var stopping = false
@@ -105,7 +104,6 @@ class mDNS internal constructor(
 
     /** Optional external scope (from plugin); otherwise create our own on Main. */
     private val scope = externalScope ?: CoroutineScope(SupervisorJob() + mainDispatcher)
-    private val discoverMutex = Mutex()
     private val broadcastMutex = Mutex()
     private val watchMutex = Mutex()
     private var closed = false
@@ -140,10 +138,13 @@ class mDNS internal constructor(
         name: String,
         port: Int,
         onSuccess: (String) -> Unit,
-        onError: (Throwable) -> Unit
+        onError: (Throwable) -> Unit,
+        txt: Map<String, String> = emptyMap()
     ) {
         require(port in 1..65535) { "Port must be between 1 and 65535" }
-        val type = if (typeRaw.endsWith(".")) typeRaw else "$typeRaw."
+        val type = MdnsValidation.type(typeRaw)
+        val normalizedName = MdnsValidation.name(name).ifEmpty { "DevIOArtsMDNS" }
+        MdnsValidation.txt(txt)
 
         scope.launch(mainDispatcher) {
             broadcastMutex.withLock {
@@ -181,6 +182,7 @@ class mDNS internal constructor(
                             session,
                             IllegalStateException("Timed out waiting for service publish after ${publishTimeoutMs}ms")
                         )
+                        unregister(session)
                         releaseRegistrationLock(session)
                     }
 
@@ -188,8 +190,8 @@ class mDNS internal constructor(
                     try {
                         backend.acquireMulticastLock()
                         session.lockHeld = true
-                        session.token = backend.registerService(type, name, port, listener)
-                        if (session.cancelled && session.registered) unregister(session)
+                        session.token = backend.registerService(type, normalizedName, port, txt.toMap(), listener)
+                        if (session.cancelled) unregister(session)
                     } catch (t: Throwable) {
                         finishRegistration(session)
                         completeRegistrationError(session, t)
@@ -222,7 +224,7 @@ class mDNS internal constructor(
      * Discover services, optionally filtering by instance name using a normalized exact-or-prefix match.
      *
      * Behavior:
-     * - Runs on the main dispatcher; concurrent calls are serialized.
+     * - Runs on the main dispatcher; a new valid call replaces the previous one.
      * - Resolves candidates to host/port.
      * - If `targetName` is provided, compare using normalized names and accept exact OR prefix match.
      * - Early-exits when a matching service is resolved (stops discovery immediately).
@@ -237,11 +239,12 @@ class mDNS internal constructor(
         typeRaw: String,
         targetName: String? = null,
         timeoutMs: Int = 3000
-    ): List<MdnsService> = discoverMutex.withLock {
-        withContext(mainDispatcher) {
+    ): List<MdnsService> = withContext(mainDispatcher) {
             check(!closed) { "mDNS manager is closed" }
-            val type = if (typeRaw.endsWith(".")) typeRaw else "$typeRaw."
-            val session = DiscoverySession(listOf(type), targetName)
+            val type = MdnsValidation.type(typeRaw)
+            val target = MdnsValidation.name(targetName).takeIf { it.isNotEmpty() }
+            activeDiscovery?.fail(IllegalStateException("Discovery replaced by a new request"))
+            val session = DiscoverySession(listOf(type), target)
             activeDiscovery = session
             try {
                 session.start(timeoutMs.coerceAtLeast(0).toLong())
@@ -251,7 +254,6 @@ class mDNS internal constructor(
                 session.close()
                 if (activeDiscovery === session) activeDiscovery = null
             }
-        }
     }
 
     /**
@@ -285,7 +287,7 @@ class mDNS internal constructor(
     // ---- Registration helpers ------------------------------------------------
 
     private fun handleRegistered(session: RegistrationSession, publishedName: String) {
-        session.registered = true
+        if (session.finished) return
         if (session.cancelled) {
             // The caller gave up (stop/replace/timeout) before the OS confirmed: undo it now.
             unregister(session)
@@ -316,8 +318,8 @@ class mDNS internal constructor(
         session.cancelled = true
         completeRegistrationError(session, IllegalStateException(reason))
         if (session.stopped.isCompleted) session.stopped = CompletableDeferred()
-        // An unconfirmed registration can only be undone after onRegistered arrives.
-        if (session.registered) unregister(session)
+        // NsdManager identifies pending requests by their listener, so cancellation need not wait for confirmation.
+        unregister(session)
         try {
             withTimeout(stopTimeoutMs) { session.stopped.await() }?.let { throw it }
         } catch (t: Throwable) {
@@ -342,6 +344,7 @@ class mDNS internal constructor(
     }
 
     private fun finishRegistration(session: RegistrationSession) {
+        session.finished = true
         if (activeRegistration === session) activeRegistration = null
         releaseRegistrationLock(session)
         session.stopped.complete(null)
@@ -359,11 +362,7 @@ class mDNS internal constructor(
     suspend fun watchServices(typesRaw: List<String>, listener: WatchListener): Int = watchMutex.withLock { withContext(mainDispatcher) {
         check(!closed) { "mDNS manager is closed" }
         require(typesRaw.isNotEmpty()) { "Missing or empty 'types' array" }
-        val types = typesRaw.map { raw ->
-            val type = raw.trim().removeSuffix(".")
-            require(Regex("^_[^.]+\\._(tcp|udp)$").matches(type)) { "Invalid service type: $raw" }
-            "$type."
-        }.distinct()
+        val types = typesRaw.map { MdnsValidation.type(it.also { raw -> require(raw.isNotBlank()) { "Invalid service type" } }) }.distinct()
         stopWatch()?.let { throw it }
         check(!closed) { "mDNS manager is closed" }
         val session = DiscoverySession(types, null, listener)
@@ -422,17 +421,24 @@ class mDNS internal constructor(
         p.timeoutJob = scope.launch(mainDispatcher) {
             delay(resolveTimeoutMs)
             if (p.generation != generation) return@launch
+            if (p.done) { finishResolve(p); pump(); return@launch }
             resolveFailed(p, "Timed out resolving ${p.service.name}", retry = p.owner.isWatching)
         }
         val listener = object : NsdBackend.ResolveListener {
             override fun onResolved(service: MdnsService) = runOnMain {
-                if (p.done || p.generation != generation || p !in resolving) return@runOnMain
+                if (p.generation != generation || p !in resolving) return@runOnMain
+                if (p.done) { finishResolve(p); pump(); return@runOnMain }
+                if (service.hosts.isEmpty()) {
+                    resolveFailed(p, "Resolved service has no IP address", retry = true)
+                    return@runOnMain
+                }
                 finishResolve(p)
                 p.owner.resolved(p, service)
                 pump()
             }
             override fun onFailed(errorCode: Int) = runOnMain {
                 if (p.generation != generation) return@runOnMain
+                if (p.done) { finishResolve(p); pump(); return@runOnMain }
                 resolveFailed(p, "Resolve failed: $errorCode", p.owner.isWatching || errorCode == NsdManager.FAILURE_ALREADY_ACTIVE)
             }
         }
@@ -462,11 +468,13 @@ class mDNS internal constructor(
         pump()
     }
 
-    private fun finishResolve(p: Pending) {
+    private fun finishResolve(p: Pending, cancelled: Boolean = false) {
         p.done = true
-        p.timeoutJob?.cancel()
         p.retryJob?.cancel()
         resolveQueue.remove(p)
+        // Legacy NSD cannot cancel a resolve; reserve its slot until its callback or timeout.
+        if (cancelled && !backend.supportsConcurrentResolve && p in resolving) return
+        p.timeoutJob?.cancel()
         resolving.remove(p)
         p.token?.let { safeCancelResolve(it) }
     }
@@ -518,7 +526,7 @@ class mDNS internal constructor(
                     override fun onLost(service: DiscoveredService) = runOnMain {
                         if (closed || !isWatching) return@runOnMain
                         val key = key(service.name, type)
-                        pending.remove(key)?.let { finishResolve(it); pump() }
+                        pending.remove(key)?.let { finishResolve(it, cancelled = true); pump() }
                         found.remove(key)?.let { watchListener?.onServiceLost(it) }
                     }
                 }
@@ -549,7 +557,7 @@ class mDNS internal constructor(
             if (closed) return
             closed = true
             timeoutJob?.cancel()
-            pending.values.toList().forEach { finishResolve(it) }
+            pending.values.toList().forEach { finishResolve(it, cancelled = true) }
             pending.clear()
             pump()
             for (token in discoveryTokens) {
@@ -594,7 +602,7 @@ class mDNS internal constructor(
     }
 
     /** Normalization for the " (n)" suffix appended by the OS. */
-    private fun normalize(s: String): String = s.replace(NAME_SUFFIX, "")
+    private fun normalize(s: String): String = s.replace(NAME_SUFFIX, "").replace('.', '-')
 
     /** Best-effort stop service info updates; NSD may throw if not registered. */
     private fun safeCancelResolve(token: Any) {

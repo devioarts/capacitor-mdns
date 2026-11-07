@@ -1,26 +1,8 @@
 import React, { useEffect } from "react";
 
-export type LoggerSink = "panel" | "console" | "both";
-
-export interface LogEntry {
-  ts: number;
-  level: "info" | "warn" | "error";
-  scope: string;
-  msg: string;
-  data?: unknown;
-}
-
-interface LoggerCtx {
-  sink: LoggerSink;
-  setSink: (s: LoggerSink) => void;
-  logs: LogEntry[];
-  clear: () => void;
-  info: (scope: string, msg: string, data?: unknown) => void;
-  warn: (scope: string, msg: string, data?: unknown) => void;
-  error: (scope: string, msg: string, data?: unknown) => void;
-}
-
-const Ctx = React.createContext<LoggerCtx | null>(null);
+import { Ctx, useLogger } from "./LoggerContext.ts";
+import type { LoggerCtx, LoggerSink, LogEntry } from "./LoggerContext.ts";
+export type { LoggerSink, LogEntry } from "./LoggerContext.ts";
 
 export const LoggerProvider: React.FC<React.PropsWithChildren> = ({ children }) => {
   const [sink, setSink] = React.useState<LoggerSink>("console");
@@ -55,12 +37,6 @@ export const LoggerProvider: React.FC<React.PropsWithChildren> = ({ children }) 
 
   return <Ctx.Provider value={ctx}>{children}</Ctx.Provider>;
 };
-
-export function useLogger(): LoggerCtx {
-  const v = React.useContext(Ctx);
-  if (!v) throw new Error("LoggerProvider missing");
-  return v;
-}
 
 export const LoggerSinkSwitch: React.FC = () => {
   const { sink, setSink } = useLogger();

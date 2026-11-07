@@ -1,8 +1,6 @@
 import Foundation
 import Darwin
-#if canImport(Network)
 import Network
-#endif
 
 /// iOS mDNS manager.
 /// - Publishes via `NetService`.
@@ -12,7 +10,6 @@ import Network
 public class MDNS: NSObject {
     // Tunables and seams. Internal (not private) so unit tests can shorten timers and inject fake services.
     internal var publishTimeoutMs = 5000
-    internal var settleDebounceMs = 350
     internal var resolveTimeoutSeconds: TimeInterval = 5.0
     internal var makeBrowser: () -> NetServiceBrowser = { NetServiceBrowser() }
     internal var makeService: (_ domain: String, _ type: String, _ name: String, _ port: Int32?) -> NetService =
@@ -38,9 +35,7 @@ public class MDNS: NSObject {
     // MARK: - Discovery state
 
     private var nsBrowser: NetServiceBrowser?
-    #if canImport(Network)
-    private var nwBrowser: Any? // keep as `Any` to allow building against older SDKs
-    #endif
+    private var nwBrowser: NWBrowser?
 
     /// Map the resolving `NetService` → service box (accumulates details while resolving).
     private var resolveMap: [NetService: ServiceBox] = [:]
@@ -55,9 +50,8 @@ public class MDNS: NSObject {
     private var discoveryError: Error?
     private var discoverySession: UInt64 = 0
 
-    /// Timers: hard timeout and short settle debounce.
+    /// Discovery hard timeout.
     private var hardTimeout: DispatchWorkItem?
-    private var settleDebounce: DispatchWorkItem?
 
     deinit {
         watchSession?.stop()
@@ -78,16 +72,21 @@ public class MDNS: NSObject {
     ///   - txt: Optional TXT dictionary (string → string).
     ///   - completion: Called with the final (possibly uniquified) `name`, or an error.
     public func broadcast(
-        type: String,
-        name: String,
+        type rawType: String,
+        name rawName: String,
         port: Int,
         txt: [String: String]?,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
-        guard (1...65535).contains(port) else {
-            completion(.failure(Self.error("Missing/invalid port")))
-            return
-        }
+        let type: String
+        let name: String
+        do {
+            guard (1...65535).contains(port) else { throw Self.error("Missing/invalid port") }
+            type = try Self.validatedType(rawType)
+            let normalizedName = try Self.validatedName(rawName)
+            name = normalizedName.isEmpty ? "DevIOArtsMDNS" : normalizedName
+            try Self.validateTXT(txt)
+        } catch { completion(.failure(error)); return }
 
         runOnMain { [weak self] in
             guard let self = self else {
@@ -134,12 +133,19 @@ public class MDNS: NSObject {
     ///   - useNW: Prefer `NWBrowser` when available (default `true`), fallback to `NetServiceBrowser` otherwise.
     ///   - completion: Success with normalized service dictionaries, or failure with error.
     public func discover(
-        type: String,
-        name: String?,
+        type rawType: String,
+        name rawName: String?,
         timeoutMs: Int,
         useNW: Bool = true,
         completion: @escaping (Result<[[String: Any]], Error>) -> Void
     ) {
+        let type: String
+        let name: String?
+        do {
+            type = try Self.validatedType(rawType)
+            let trimmed = try Self.validatedName(rawName ?? "")
+            name = trimmed.isEmpty ? nil : trimmed
+        } catch { completion(.failure(error)); return }
         runOnMain { [weak self] in
             guard let self = self else {
                 completion(.failure(Self.error("mDNS manager was released before discovery could start")))
@@ -167,12 +173,10 @@ public class MDNS: NSObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(max(0, timeoutMs)), execute: ht)
 
             // Start browsing: NWBrowser preferred when available and requested.
-            #if canImport(Network)
-            if useNW, #available(iOS 12.0, *) {
+            if useNW {
                 self.startNWBrowse(typeWithDot: type, session: session)
                 return
             }
-            #endif
             // Fallback: NetServiceBrowser
             let b = self.makeBrowser()
             b.includesPeerToPeer = true
@@ -185,8 +189,6 @@ public class MDNS: NSObject {
 
     // MARK: - Internal: NWBrowser discovery
 
-    #if canImport(Network)
-    @available(iOS 12.0, *)
     private func startNWBrowse(typeWithDot: String, session: UInt64) {
         // NWBrowser expects type without trailing dot.
         let typeNoDot = typeWithDot.hasSuffix(".") ? String(typeWithDot.dropLast()) : typeWithDot
@@ -229,7 +231,6 @@ public class MDNS: NSObject {
 
         browser.start(queue: .main)
     }
-    #endif
 
     // MARK: - Internal: finalize & helpers
 
@@ -244,7 +245,7 @@ public class MDNS: NSObject {
         var seen = Set<String>()
         var out: [[String: Any]] = []
 
-        for box in discovered where box.resolved {
+        for box in discovered where box.resolved && !box.hosts.isEmpty {
             let key = "\(box.name):\(box.port):\(box.hosts.first ?? "")"
             if seen.contains(key) { continue }
             seen.insert(key)
@@ -268,34 +269,16 @@ public class MDNS: NSObject {
         }
     }
 
-    /// Cancel timers (hard timeout and settle debounce).
+    /// Cancel the discovery timeout.
     private func cancelTimers() {
         hardTimeout?.cancel(); hardTimeout = nil
-        settleDebounce?.cancel(); settleDebounce = nil
-    }
-
-    /// Schedule a short debounce to finish discovery once nothing is left to resolve.
-    /// While any resolver is outstanding this does nothing: finishing early would drop services
-    /// whose resolve simply takes longer than the debounce window.
-    private func settleIfIdle(session: UInt64? = nil) {
-        settleDebounce?.cancel()
-        settleDebounce = nil
-        guard resolveMap.isEmpty, discoverCompletion != nil else { return }
-        let session = session ?? discoverySession
-        let wi = DispatchWorkItem { [weak self] in self?.finishDiscovery(session: session) }
-        settleDebounce = wi
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(settleDebounceMs), execute: wi)
     }
 
     /// Stop any active browsers.
     private func stopBrowsers() {
-        #if canImport(Network)
-        if #available(iOS 12.0, *) {
-            (nwBrowser as? NWBrowser)?.cancel()
-            nwBrowser = nil
-        }
-        #endif
-        // Stop all in-flight resolvers as well (best-effort).
+            nwBrowser?.cancel()
+        nwBrowser = nil
+            // Stop all in-flight resolvers as well (best-effort).
         for (svc, _) in resolveMap {
             svc.stop()
             svc.delegate = nil
@@ -330,7 +313,9 @@ public class MDNS: NSObject {
 
     /// Normalize a service name by removing the system-appended `" (n)"` suffix.
     private func normalize(_ s: String) -> String {
-        return s.replacingOccurrences(of: #" \(\d+\)$"#, with: "", options: .regularExpression)
+        return s
+            .replacingOccurrences(of: #" \(\d+\)$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: ".", with: "-")
     }
 
     /// Does `candidate` match `targetName` exactly or by prefix (both normalized)? If no target, accept all.
@@ -356,14 +341,59 @@ public class MDNS: NSObject {
 }
 
 extension MDNS {
-    #if canImport(Network)
+    private static func validatedWatchTypes(_ types: [String]) throws -> [String] {
+        guard !types.isEmpty else { throw error("Missing or empty 'types' array") }
+        var unique: [String] = []
+        for raw in types {
+            guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw error("Invalid service type") }
+            let type = try validatedType(raw)
+            if !unique.contains(type) { unique.append(type) }
+        }
+        return unique
+    }
+    public var isPublishing: Bool {
+        if Thread.isMainThread { return publisher != nil }
+        return DispatchQueue.main.sync { publisher != nil }
+    }
+    internal static func validatedType(_ raw: String) throws -> String {
+        var type = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if type.isEmpty { type = "_http._tcp." }
+        if type.hasSuffix(".") { type.removeLast() }
+        let service = type.components(separatedBy: ".").first.map { String($0.dropFirst()) } ?? ""
+        guard type.range(of: "^_[a-z0-9](?:[a-z0-9-]{0,13}[a-z0-9])?\\._(tcp|udp)$", options: .regularExpression) != nil,
+              service.range(of: "[a-z]", options: .regularExpression) != nil, !service.contains("--") else {
+            throw error("Invalid service type: \(raw)")
+        }
+        return type + "."
+    }
+    internal static func validatedName(_ raw: String) throws -> String {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name.utf8.count <= 63, !raw.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
+            throw error("Invalid instance name (maximum 63 UTF-8 bytes, no control characters)")
+        }
+        return name
+    }
+    internal static func validateTXT(_ txt: [String: String]?) throws {
+        var keys = Set<String>()
+        var totalBytes = 0
+        for (key, value) in txt ?? [:] {
+            guard !key.isEmpty,
+                  key.unicodeScalars.allSatisfy({ (32...126).contains($0.value) && $0 != "=" }),
+                  keys.insert(key.lowercased()).inserted else {
+                throw error("Invalid or duplicate TXT key")
+            }
+            let bytes = "\(key)=\(value)".utf8.count
+            totalBytes += bytes + 1
+            guard totalBytes <= 1300 else { throw error("TXT record must fit in 1300 bytes including length prefixes") }
+            guard bytes <= 255 else { throw error("TXT entries must be at most 255 UTF-8 bytes including key=") }
+        }
+    }
+
     /// `NWBrowser` parks in `.waiting(.dns(PolicyDenied))` when the Local Network permission is denied.
-    @available(iOS 12.0, *)
     static func isLocalNetworkDenied(_ error: NWError) -> Bool {
         if case .dns(let code) = error { return code == -65570 } // kDNSServiceErr_PolicyDenied
         return false
     }
-    #endif
 
     // MARK: - Internal: candidate handling (shared by NWBrowser and NetServiceBrowser)
 
@@ -375,7 +405,7 @@ extension MDNS {
     internal func handleServiceFound(name: String, type: String, domain: String) {
         guard discoverCompletion != nil, matchesTarget(name) else { return }
 
-        let normType = type.hasSuffix(".") ? type : type + "."
+        let normType = (type.hasSuffix(".") ? type : type + ".").lowercased()
         let normDomain = domain.isEmpty ? "local." : (domain.hasSuffix(".") ? domain : domain + ".")
         let key = keyFor(name: name, type: normType, domain: normDomain)
         if discovered.contains(where: { $0.identityKey == key }) { return }
@@ -390,9 +420,6 @@ extension MDNS {
         resolveMap[resolver] = box
         resolver.resolve(withTimeout: resolveTimeoutSeconds)
 
-        // A resolver is now pending: never settle (finish early) while it is outstanding.
-        settleDebounce?.cancel()
-        settleDebounce = nil
     }
 }
 
@@ -440,9 +467,6 @@ extension MDNS: NetServiceDelegate {
         // Early finish if a specific target is requested and this service matches it.
         if let t = targetName, !t.isEmpty, matchesTarget(sender.name) {
             finishDiscovery(session: discoverySession)
-        } else {
-            // Otherwise, allow a brief settle window to collect late peers (only once all resolves are done).
-            settleIfIdle(session: discoverySession)
         }
     }
 
@@ -451,7 +475,6 @@ extension MDNS: NetServiceDelegate {
         // Drop the unresolved service and try to continue with others.
         guard resolveMap.removeValue(forKey: sender) != nil else { return }
         sender.delegate = nil
-        settleIfIdle(session: discoverySession)
     }
 }
 
@@ -466,8 +489,6 @@ extension MDNS: NetServiceBrowserDelegate {
         }
         guard browser === nsBrowser else { return }
         handleServiceFound(name: service.name, type: service.type, domain: service.domain)
-        // With nothing outstanding (e.g. the candidate was filtered out) let the system settle.
-        if !moreComing { settleIfIdle(session: discoverySession) }
     }
 
     public func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
@@ -536,17 +557,8 @@ extension MDNS {
     public func watchServices(types: [String], useNW: Bool = true, completion: @escaping (Result<Int, Error>) -> Void) {
         runOnMain { [weak self] in
             guard let self = self else { completion(.failure(Self.error("mDNS manager released"))); return }
-            var unique: [String] = []
-            for raw in types {
-                let type = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard type.range(of: "^_[^.]+\\._(tcp|udp)\\.?$", options: .regularExpression) != nil else {
-                    completion(.failure(Self.error("Invalid service type: \(raw)")))
-                    return
-                }
-                let normalized = type.hasSuffix(".") ? type : type + "."
-                if !unique.contains(normalized) { unique.append(normalized) }
-            }
-            guard !unique.isEmpty else { completion(.failure(Self.error("Missing or empty 'types' array"))); return }
+            let unique: [String]
+            do { unique = try Self.validatedWatchTypes(types) } catch { completion(.failure(error)); return }
             self.stopWatch()
             let watch = WatchSession()
             self.watchSession = watch
@@ -621,7 +633,7 @@ extension MDNS {
     }
 
     private func normalizedBox(name: String, type: String, domain: String) -> ServiceBox {
-        let type = type.hasSuffix(".") ? type : type + "."
+        let type = (type.hasSuffix(".") ? type : type + ".").lowercased()
         let domain = domain.isEmpty ? "local." : (domain.hasSuffix(".") ? domain : domain + ".")
         return ServiceBox(name: name, type: type, domain: domain)
     }
@@ -666,7 +678,10 @@ extension MDNS {
     }
 
     private func watchResolved(_ sender: NetService) -> Bool {
-        guard let watch = watchSession, let box = watch.resolvers.removeValue(forKey: sender) else { return false }
+        guard let watch = watchSession, let box = watch.resolvers[sender] else { return false }
+        readResolved(sender, into: box)
+        guard !box.hosts.isEmpty else { return true }
+        watch.resolvers.removeValue(forKey: sender)
         watch.retries.removeValue(forKey: box.identityKey)?.cancel()
         readResolved(sender, into: box)
         sender.stop()
@@ -704,7 +719,7 @@ extension MDNS {
         if let txt = sender.txtRecordData() {
             box.txt = NetService.dictionary(fromTXTRecord: txt).mapValues { String(data: $0, encoding: .utf8) ?? "" }
         }
-        box.resolved = true
+        box.resolved = !box.hosts.isEmpty
     }
 }
 
@@ -753,17 +768,17 @@ func parseHosts(_ addrs: [Data]?) -> [String] {
 
     for data in addrs {
         data.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return }
+            guard raw.count >= MemoryLayout<sockaddr>.size, let base = raw.baseAddress else { return }
             let sa = base.assumingMemoryBound(to: sockaddr.self)
             let family = Int32(sa.pointee.sa_family)
 
-            if family == AF_INET {
+            if family == AF_INET, raw.count >= MemoryLayout<sockaddr_in>.size {
                 var addr = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
                 var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
                 if inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
                     out.append(String(cString: buf))
                 }
-            } else if family == AF_INET6 {
+            } else if family == AF_INET6, raw.count >= MemoryLayout<sockaddr_in6>.size {
                 let address = sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
                 var addr6 = address.sin6_addr
                 var buf6 = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))

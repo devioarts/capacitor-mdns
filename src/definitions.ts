@@ -70,9 +70,9 @@ export interface MdnsService {
  * Options for starting a Bonjour/mDNS advertisement.
  *
  * @remarks
- * - The `type` **must** end with a dot (`.`). If omitted, the implementation appends it.
+ * - Service types accept an optional trailing dot; results always include it.
  * - Instance `name` should be short and human-readable; the OS may append `" (n)"` to ensure uniqueness.
- * - Advertising TXT is supported on iOS and Electron; this plugin ignores broadcast TXT on Android.
+ * - Advertising TXT is supported on iOS, Android and Electron. Invalid input preserves the active advertisement.
  * - Native implementations guard publish with a timeout and return `error: true` instead of
  *   leaving the Promise pending when the OS does not deliver a publish callback.
  * - Only one advertisement is active at a time. Starting a new one stops the previous one first.
@@ -88,9 +88,9 @@ export interface MdnsBroadcastOptions {
   type?: string;
 
   /**
-   * Service instance name.
+   * Service instance name (maximum 63 UTF-8 bytes). Defaults to `DevIOArtsMDNS`.
    */
-  name: string;
+  name?: string;
 
   /**
    * TCP port to advertise.
@@ -100,7 +100,7 @@ export interface MdnsBroadcastOptions {
 
   /**
    * Optional TXT key–value pairs (UTF-8 strings).
-   * @remarks Advertising TXT is not implemented on Android.
+   * @remarks Keys must be unique ignoring case, nonempty printable ASCII without `=`. Each `key=value` entry must fit in 255 UTF-8 bytes. The complete record is limited to 1300 bytes including length prefixes. Non-string values are rejected.
    */
   txt?: MdnsTxt;
 }
@@ -112,8 +112,9 @@ export interface MdnsBroadcastOptions {
  * - The `name` filter matches the normalized name and also accepts prefix matches
  *   (to handle OS-added `" (n)"` suffixes).
  * - When `useNW` is `true` on iOS, discovery uses `NWBrowser` for better P2P behavior.
- * - Discovery is timeboxed. Concurrent discovery requests are serialized or safely replace
- *   the previous native session so old callbacks cannot complete a newer request.
+ * - A valid new discovery replaces the previous request with an error on every platform.
+ * - Dots and hyphens are equivalent when matching names; returned names retain their advertised spelling.
+ * - Without a name filter, browsing continues for the entire timeout. With a filter it may finish once a matching IP address resolves.
  *
  * @public
  */
@@ -132,7 +133,7 @@ export interface MdnsDiscoverOptions {
   name?: string;
 
   /**
-   * Discovery timeout in milliseconds.
+   * Discovery timeout in milliseconds. Finite numbers only; fractions are truncated and the delay is clamped to 0–2147483647.
    * @defaultValue `3000`
    */
   timeout?: number;
@@ -172,7 +173,7 @@ export interface MdnsDiscoverResult {
   errorMessage: string | null;
   /** Convenience count equal to services.length. */
   servicesFound: number;
-  /** Normalized list of discovered services. */
+  /** Resolved services with numeric addresses. Empty on error; partial results are discarded. */
   services: MdnsService[];
 }
 

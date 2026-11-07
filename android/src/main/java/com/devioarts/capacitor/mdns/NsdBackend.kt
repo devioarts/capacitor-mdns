@@ -18,7 +18,7 @@ internal interface NsdBackend {
     fun acquireMulticastLock()
     fun releaseMulticastLock()
 
-    fun registerService(type: String, name: String, port: Int, listener: RegistrationListener): Any
+    fun registerService(type: String, name: String, port: Int, txt: Map<String, String>, listener: RegistrationListener): Any
     fun unregisterService(token: Any)
 
     fun startDiscovery(type: String, listener: DiscoveryListener): Any

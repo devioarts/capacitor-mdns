@@ -1,3 +1,4 @@
+import type Bonjour from 'bonjour-service';
 import { EventEmitter } from 'node:events';
 import type {
   MdnsBroadcastOptions,
@@ -11,8 +12,15 @@ import type {
   MdnsWatchStopResult,
 } from '../../dist/esm/definitions';
 
+export type BonjourLike = Pick<Bonjour, 'publish' | 'find' | 'destroy'>;
+export interface MdnsOptions {
+  publishTimeoutMs?: number;
+  stopTimeoutMs?: number;
+  /** Exact trusted renderer origins, e.g. http://localhost:5173. */
+  trustedOrigins?: string[];
+}
 export declare class mDNS extends EventEmitter {
-  constructor();
+  constructor(bonjour?: BonjourLike, options?: MdnsOptions);
   getPluginPlatform(): Promise<MdnsPluginPlatformResult>;
   startBroadcast(options: MdnsBroadcastOptions): Promise<MdnsBroadcastResult>;
   stopBroadcast(): Promise<MdnsStopResult>;

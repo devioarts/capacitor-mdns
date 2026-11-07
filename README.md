@@ -47,7 +47,9 @@ const errors = await mDNS.addListener('watchError', (event) => {
   console.error(event.type, event.errorMessage, event.watching);
 });
 
-await mDNS.watchServices({ types: ['_http._tcp.', '_ipp._tcp.'] });
+const result = await mDNS.watchServices({
+  types: ['_http._tcp.', '_airplay._tcp.', '_googlecast._tcp.'],
+});
 // Later, including when leaving the screen:
 await mDNS.stopWatching();
 await Promise.all([found.remove(), lost.remove(), errors.remove()]);
@@ -262,12 +264,12 @@ describes the issue.
 
 Options for starting a Bonjour/mDNS advertisement.
 
-| Prop       | Type                                        | Description                                   |
-| ---------- | ------------------------------------------- | --------------------------------------------- |
-| **`type`** | <code>string</code>                         | Service type (including the trailing dot).    |
-| **`name`** | <code>string</code>                         | Service instance name.                        |
-| **`port`** | <code>number</code>                         | TCP port to advertise.                        |
-| **`txt`**  | <code><a href="#mdnstxt">MdnsTxt</a></code> | Optional TXT key–value pairs (UTF-8 strings). |
+| Prop       | Type                                        | Description                                                                  |
+| ---------- | ------------------------------------------- | ---------------------------------------------------------------------------- |
+| **`type`** | <code>string</code>                         | Service type (including the trailing dot).                                   |
+| **`name`** | <code>string</code>                         | Service instance name (maximum 63 UTF-8 bytes). Defaults to `DevIOArtsMDNS`. |
+| **`port`** | <code>number</code>                         | TCP port to advertise.                                                       |
+| **`txt`**  | <code><a href="#mdnstxt">MdnsTxt</a></code> | Optional TXT key–value pairs (UTF-8 strings).                                |
 
 
 #### MdnsStopResult
@@ -286,12 +288,12 @@ after the call (normally false) and includes error information.
 
 Result of discover(). Contains normalized services and error information.
 
-| Prop                | Type                        | Description                                                                    |
-| ------------------- | --------------------------- | ------------------------------------------------------------------------------ |
-| **`error`**         | <code>boolean</code>        | True if discovery encountered an error (partial results may still be present). |
-| **`errorMessage`**  | <code>string \| null</code> | Error description or null when no error occurred.                              |
-| **`servicesFound`** | <code>number</code>         | Convenience count equal to services.length.                                    |
-| **`services`**      | <code>MdnsService[]</code>  | Normalized list of discovered services.                                        |
+| Prop                | Type                        | Description                                                                              |
+| ------------------- | --------------------------- | ---------------------------------------------------------------------------------------- |
+| **`error`**         | <code>boolean</code>        | True if discovery encountered an error (partial results may still be present).           |
+| **`errorMessage`**  | <code>string \| null</code> | Error description or null when no error occurred.                                        |
+| **`servicesFound`** | <code>number</code>         | Convenience count equal to services.length.                                              |
+| **`services`**      | <code>MdnsService[]</code>  | Resolved services with numeric addresses. Empty on error; partial results are discarded. |
 
 
 #### MdnsService
@@ -314,12 +316,12 @@ Returned from {@link mDNSPlugin.discover}.
 
 Options for Bonjour/mDNS discovery.
 
-| Prop          | Type                 | Description                                                      |
-| ------------- | -------------------- | ---------------------------------------------------------------- |
-| **`type`**    | <code>string</code>  | Service type (including the trailing dot).                       |
-| **`name`**    | <code>string</code>  | Optional instance name filter (prefix-safe).                     |
-| **`timeout`** | <code>number</code>  | Discovery timeout in milliseconds.                               |
-| **`useNW`**   | <code>boolean</code> | iOS-only hint to use `NWBrowser` instead of `NetServiceBrowser`. |
+| Prop          | Type                 | Description                                                                                                               |
+| ------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **`type`**    | <code>string</code>  | Service type (including the trailing dot).                                                                                |
+| **`name`**    | <code>string</code>  | Optional instance name filter (prefix-safe).                                                                              |
+| **`timeout`** | <code>number</code>  | Discovery timeout in milliseconds. Finite numbers only; fractions are truncated and the delay is clamped to 0–2147483647. |
+| **`useNW`**   | <code>boolean</code> | iOS-only hint to use `NWBrowser` instead of `NetServiceBrowser`.                                                          |
 
 
 #### MdnsWatchResult

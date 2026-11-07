@@ -1,5 +1,6 @@
 import Capacitor
 import Foundation
+import CoreFoundation
 
 /**
  * Capacitor bridge for the iOS mDNS plugin.
@@ -41,13 +42,19 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
         return v ?? NSNull()
     }
 
-    private func normalizeType(_ raw: String?) -> String {
-        var t = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if t.isEmpty { t = "_http._tcp." }
-        if t.last != "." { t += "." }
-        return t
+    private func stringOption(_ call: CAPPluginCall, _ key: String) throws -> String? {
+        guard let raw = call.options[key], !(raw is NSNull) else { return nil }
+        guard let value = raw as? String else { throw inputError("Invalid \(key)") }
+        return value
     }
-
+    private func inputError(_ message: String) -> NSError {
+        NSError(domain: "mDNS", code: -1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+    private func numberOption(_ call: CAPPluginCall, _ key: String, fallback: Double) throws -> Double {
+        guard let raw = call.options[key], !(raw is NSNull) else { return fallback }
+        guard let value = raw as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(), value.doubleValue.isFinite else { throw inputError("Invalid \(key)") }
+        return value.doubleValue
+    }
     // MARK: - API
 
     /// getPluginPlatform()
@@ -59,21 +66,23 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
 
     /// startBroadcast({ type?, name?, port, txt? })
     @objc public func startBroadcast(_ call: CAPPluginCall) {
-        let type = normalizeType(call.getString("type"))
-        let name = (call.getString("name")?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? "DevIOArtsMDNS"
-        let port = call.getInt("port") ?? 0
-        let txt  = call.getObject("txt")?.compactMapValues { $0 as? String }
-
-        guard (1...65535).contains(port) else {
-            call.resolve([
-                "publishing": false,
-                "name": "",
-                "error": true,
-                "errorMessage": "Missing/invalid port"
-            ])
+        let type: String, name: String, port: Int, txt: [String: String]?
+        do {
+            type = try MDNS.validatedType(stringOption(call, "type") ?? "")
+            name = try MDNS.validatedName(stringOption(call, "name") ?? "")
+            let number = try numberOption(call, "port", fallback: 0)
+            guard (1...65535).contains(number), number.rounded(.towardZero) == number else { throw inputError("Missing/invalid port") }
+            port = Int(number)
+            let raw = call.options["txt"]
+            if raw == nil || raw is NSNull { txt = nil } else {
+                guard let values = raw as? [String: String] else { throw inputError("TXT must be an object of strings") }
+                txt = values
+            }
+            try MDNS.validateTXT(txt)
+        } catch {
+            call.resolve(["publishing": mdns.isPublishing, "name": "", "error": true, "errorMessage": error.localizedDescription])
             return
         }
-
         mdns.broadcast(type: type, name: name, port: port, txt: txt) { result in
             switch result {
             case .success(let finalName):
@@ -114,11 +123,17 @@ public class mDNSPlugin: CAPPlugin, CAPBridgedPlugin {
 
     /// discover({ type?, name?, timeout? })
     @objc public func discover(_ call: CAPPluginCall) {
-        let type = normalizeType(call.getString("type"))
-        let targetName = (call.getString("name")?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-        let timeout = call.getInt("timeout") ?? 3000
+        let type: String, targetName: String?, timeout: Int
+        do {
+            type = try MDNS.validatedType(stringOption(call, "type") ?? "")
+            let name = try MDNS.validatedName(stringOption(call, "name") ?? "")
+            targetName = name.isEmpty ? nil : name
+            timeout = Int(min(2_147_483_647, max(0, try numberOption(call, "timeout", fallback: 3000))))
+        } catch {
+            call.resolve(["error": true, "errorMessage": error.localizedDescription, "servicesFound": 0, "services": []])
+            return
+        }
         let useNW = call.getBool("useNW") ?? true
-
         mdns.discover(type: type, name: targetName, timeoutMs: timeout, useNW: useNW) { result in
             switch result {
             case .success(let services):

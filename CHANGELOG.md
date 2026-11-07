@@ -11,22 +11,24 @@
   [PR #7](https://github.com/devioarts/capacitor-mdns/pull/7).
 - Full found/lost snapshots, duplicate-type normalization, stale-callback guards, native resolve
   retries, shared Android resolver scheduling and multicast locks, and Electron TTL expiry / IPC events.
-- Resolved Android NSD TXT attributes, optional service hostnames, a playground watch control and
+- Resolved Android NSD TXT attributes, optional service hostnames, playground live service lists / errors / TXT publication and
   regression tests for watcher lifecycle and both Electron integration routes.
 
 ### Fixed
 
 - Android: NSD callbacks (delivered on NsdManager's internal thread) are now marshalled to the main thread before touching any state, removing data races between discovery results, the timeout, and publish completion. A publish confirmation racing the publish timeout can no longer complete the call twice.
 - Android: before API 34 only one `resolveService` may be active, so concurrent resolves were silently dropped and services lost. Resolves are now queued, retried on `FAILURE_ALREADY_ACTIVE`, and individually timed out.
-- Android: stopping or replacing a registration that the OS has not confirmed yet no longer calls `unregisterService` too early; a late confirmation is unregistered when it arrives. `close()` now fails a pending `discover()` instead of leaving it waiting.
-- iOS: discovery no longer finishes while a resolver is still outstanding, which could return an empty or partial list when a resolve took longer than the 350 ms settle window.
+- Android: stopping, replacing or timing out a pending registration cancels it immediately through its listener, allowing subsequent publication. Late callbacks cannot resurrect a cancelled service. `close()` fails pending discovery.
+- iOS: discovery waits for the entire requested timeout unless a named target resolves with an IP address, retaining late peers even after a failed or filtered resolve.
 - iOS: the `NWBrowser` duplicate check used un-normalized type/domain, so every browse update spawned new resolvers for already known services.
 - iOS: a denied Local Network permission is now reported as an error instead of an empty discovery result.
-- iOS: `txt` values that are not strings are skipped instead of dropping the whole TXT record.
+- All platforms validate service types, UTF-8 instance/TXT lengths and string-only TXT before stopping an active advertisement. Android now publishes TXT as well.
 
 - Electron: a malformed service type (e.g. `http`, `_http._xyz.`) is now rejected with an error instead of being silently advertised/browsed as `_http._tcp.`, matching iOS and Android. An invalid type no longer stops a broadcast that is already running.
-- Electron: non-finite `timeout` values (`NaN`, `Infinity`) used to end discovery after ~1 ms; they now fall back to the 3000 ms default, and delays are clamped to the timer maximum.
-- Electron: `destroy()` now ends in-flight discoveries (returning partial results flagged as an error) instead of leaving them waiting for their timeout, and a late browser event can no longer mutate an already returned result.
+- All platforms reject invalid timeouts, clamp valid delays and use the same default broadcast name. A new valid `discover()` replaces its predecessor; errors return empty results. Dots and hyphens compare equally in name filters.
+- Electron: transport errors fail pending publication, name conflicts are reported explicitly, and discovery handles late address records. Destroy ends pending discoveries and late callbacks cannot mutate completed results.
+- Electron: manual IPC checks trusted top-level senders and event recipients.
+- npm archives exclude local audit files while retaining SwiftPM tests. Android declares coroutines directly and lint failures block builds. iOS requires version 15, matching Capacitor 8.
 
 ### Changed
 
@@ -34,11 +36,12 @@
 - Electron: `new mDNS(bonjour?, options?)` accepts an injectable Bonjour implementation and timeouts for tests.
 - Android: NSD access moved behind an internal `NsdBackend` seam (`AndroidNsdBackend` in production) so the logic is unit-testable on the JVM.
 - iOS: `MDNS` exposes internal factories and timers for tests.
+- Removed the unused disabled Dependabot template and Android instrumentation placeholder. Playground lint uses the installed flat React configuration and ignores generated native projects.
 
 ### Tests
 
-- Added 15 network-free Electron tests (fake Bonjour: type/port validation, publish errors and timeout, filtering, dedup, early exit, timeout handling, destroy).
-- Added JVM unit tests for the Android manager (19 cases: callback threading, publish timeout/replace/stop, legacy resolve queue, early exit, close) and XCTest cases for the iOS manager (14 cases). Removed the template placeholder tests.
+- Added deterministic Electron regressions for validation, publication/stop failures, replacement, late addresses, TTL expiry, IPC trust and bridge subscriptions, plus real network discovery tests.
+- Added JVM and iOS simulator regressions for callbacks, timeouts, replacement, UTF-8 validation, resolver scheduling, watcher cleanup and stale events. Removed template placeholder tests.
 
 ## [0.1.0]
 

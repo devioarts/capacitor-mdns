@@ -16,7 +16,7 @@ import org.json.JSONObject
  * - Never reject for runtime errors; always resolve with { error, errorMessage }.
  *
  * Parameters (strict, no legacy):
- * - startBroadcast: { type?: string, name?: string, port: number, txt?: Record<string,string> }  // txt ignored by Android
+ * - startBroadcast: { type?: string, name?: string, port: number, txt?: Record<string,string> }
  * - stopBroadcast:  {}
  * - discover:       { type?: string, name?: string, timeout?: number }
  *
@@ -51,14 +51,27 @@ class mDNSPlugin : Plugin() {
 
     private fun jnull(msg: String?): Any = msg ?: JSONObject.NULL
 
-    private fun normalizeType(raw: String?): String {
-        val type = raw?.trim()?.takeIf { it.isNotEmpty() } ?: "_http._tcp."
-        return if (type.endsWith(".")) type else "$type."
+    private fun stringOption(call: PluginCall, key: String): String? {
+        val raw = call.data.opt(key)
+        require(raw == null || raw === JSONObject.NULL || raw is String) { "Invalid $key" }
+        return raw as? String
     }
-
-    private fun normalizeName(raw: String?): String =
-        raw?.trim()?.takeIf { it.isNotEmpty() } ?: (context?.packageName ?: "DevIOArtsMDNS")
-
+    private fun txtOption(call: PluginCall): Map<String, String> {
+        val raw = call.data.opt("txt")
+        if (raw == null || raw === JSONObject.NULL) return emptyMap()
+        require(raw is JSONObject) { "TXT must be an object of strings" }
+        return raw.keys().asSequence().associateWith { key ->
+            val value = raw.get(key)
+            require(value is String) { "TXT values must be strings" }
+            value
+        }.also { MdnsValidation.txt(it) }
+    }
+    private fun timeoutOption(call: PluginCall): Int {
+        val raw = call.data.opt("timeout")
+        if (raw == null || raw === JSONObject.NULL) return 3000
+        require(raw is Number && raw.toDouble().isFinite()) { "Invalid timeout" }
+        return raw.toDouble().coerceIn(0.0, Int.MAX_VALUE.toDouble()).toInt()
+    }
     private fun jsResultBroadcast(publishing: Boolean, name: String, error: Boolean, msg: String?): JSObject =
         JSObject().put("publishing", publishing)
             .put("name", name)
@@ -96,34 +109,34 @@ class mDNSPlugin : Plugin() {
     /**
      * Start advertising a Bonjour/mDNS service.
      * - type: default "_http._tcp."
-     * - name: default packageName
+     * - name: default DevIOArtsMDNS
      * - port: required (> 0)
      */
     @PluginMethod
     fun startBroadcast(call: PluginCall) {
-        val type = normalizeType(call.getString("type"))
-        val name = normalizeName(call.getString("name"))
-        val port = call.getInt("port") ?: 0
-
-        if (port !in 1..65535) {
-            call.resolve(jsResultBroadcast(false, "", true, "Missing/invalid port"))
-            return
-        }
-
-        try {
-            mdns.broadcast(
-                typeRaw = type,
-                name = name,
-                port = port,
-                onSuccess = { published ->
-                    call.resolve(jsResultBroadcast(true, published, false, null))
-                },
-                onError = { err ->
-                    call.resolve(jsResultBroadcast(mdns.isPublishing, "", true, toErrorMessage(err)))
-                }
-            )
-        } catch (t: Throwable) {
-            call.resolve(jsResultBroadcast(false, "", true, toErrorMessage(t)))
+        scope.launch {
+            try {
+                val type = MdnsValidation.type(stringOption(call, "type"))
+                val name = MdnsValidation.name(stringOption(call, "name")).ifEmpty { "DevIOArtsMDNS" }
+                val rawPort = call.data.opt("port")
+                require(rawPort is Number && rawPort.toDouble() in 1.0..65535.0 && rawPort.toDouble() % 1.0 == 0.0) { "Missing/invalid port" }
+                val port = rawPort.toInt()
+                val txt = txtOption(call)
+                mdns.broadcast(
+                    typeRaw = type,
+                    name = name,
+                    port = port,
+                    txt = txt,
+                    onSuccess = { published ->
+                        call.resolve(jsResultBroadcast(true, published, false, null))
+                    },
+                    onError = { err ->
+                        call.resolve(jsResultBroadcast(mdns.isPublishing, "", true, toErrorMessage(err)))
+                    }
+                )
+            } catch (t: Throwable) {
+                call.resolve(jsResultBroadcast(mdns.isPublishing, "", true, toErrorMessage(t)))
+            }
         }
     }
 
@@ -149,12 +162,11 @@ class mDNSPlugin : Plugin() {
      */
     @PluginMethod
     fun discover(call: PluginCall) {
-        val type = normalizeType(call.getString("type"))
-        val targetName = call.getString("name")?.trim()?.takeIf { it.isNotEmpty() }
-        val timeout = call.getInt("timeout") ?: 3000
-
         scope.launch {
             try {
+                val type = MdnsValidation.type(stringOption(call, "type"))
+                val targetName = MdnsValidation.name(stringOption(call, "name")).takeIf { it.isNotEmpty() }
+                val timeout = timeoutOption(call)
                 val list = mdns.discover(type, targetName, timeout)
                 val arr = JSONArray(list.map { serviceObject(it) })
                 call.resolve(jsResultDiscover(false, null, arr))

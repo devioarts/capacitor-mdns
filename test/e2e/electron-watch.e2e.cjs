@@ -36,7 +36,7 @@ function fakeBonjour() {
   return fake;
 }
 
-const service = (name, extra = {}) => ({ name, port: 80, addresses: [], host: 'test.local', ...extra });
+const service = (name, extra = {}) => ({ name, port: 80, addresses: ['10.1.2.3'], host: 'test.local', ...extra });
 
 test('watch validates before replacing, deduplicates types and emits complete snapshots', async () => {
   const fake = fakeBonjour();
@@ -54,7 +54,7 @@ test('watch validates before replacing, deduplicates types and emits complete sn
     browser.onUp(service('A', { txt: { role: 'test' } }));
     browser.onUp(service('A', { txt: { role: 'updated' } }));
     assert.equal(found.length, 1);
-    assert.deepEqual(found[0].hosts, []);
+    assert.deepEqual(found[0].hosts, ['10.1.2.3']);
     browser.emit('down', service('A'));
     assert.equal(lost.length, 1);
     assert.deepEqual(lost[0], { ...found[0], txt: { role: 'updated' } });
@@ -129,7 +129,8 @@ test('socket errors stop the watcher and are delivered as watchError', async () 
 
 test('real Bonjour browser handles late addresses, refreshes TTL, expires and rediscovers', async () => {
   const transport = new EventEmitter();
-  transport.query = () => {};
+  const queries = [];
+  transport.query = (...args) => queries.push(args);
   const mdns = new mDNS({ server: { mdns: transport }, find: (opts, cb) => new Bonjour.Browser(transport, opts, cb), destroy() {} });
   const found = [], lost = [];
   mdns.on('serviceFound', e => found.push(e.service));
@@ -142,10 +143,13 @@ test('real Bonjour browser handles late addresses, refreshes TTL, expires and re
     await mdns.watchServices({ types: ['_http._tcp.'] });
     const discovery = mdns.discover({ type: '_http._tcp.', name: 'native.app', timeout: 50 });
     transport.emit('response', packet(), {});
-    assert.equal((await discovery).servicesFound, 1);
-    assert.equal(found[0].name, 'native.app');
-    assert.deepEqual(found[0].hosts, []);
+    assert.equal((await discovery).servicesFound, 0);
+    assert.equal(found.length, 0, 'wait for a usable address before announcing a service');
+    assert.ok(queries.some(([name, type]) => name === 'test.local' && type === 'A'));
+    assert.ok(queries.some(([name, type]) => name === 'test.local' && type === 'AAAA'));
     transport.emit('response', { answers: [{ name: 'test.local', type: 'A', ttl: 120, data: '10.1.2.3' }], additionals: [] }, {});
+    assert.equal(found[0].name, 'native.app');
+    assert.deepEqual(found[0].hosts, ['10.1.2.3']);
     await sleep(650);
     transport.emit('response', packet(), {});
     await sleep(500);
@@ -153,7 +157,7 @@ test('real Bonjour browser handles late addresses, refreshes TTL, expires and re
     await sleep(1000);
     assert.equal(lost.length, 1);
     assert.deepEqual(lost[0].hosts, ['10.1.2.3']);
-    transport.emit('response', packet(), {});
+    transport.emit('response', { ...packet(), additionals: [{ name: 'test.local', type: 'A', ttl: 120, data: '10.1.2.3' }] }, {});
     assert.equal(found.length, 2);
     transport.emit('response', packet(0), {});
     assert.equal(lost.length, 2);
@@ -189,26 +193,48 @@ test('manual bridge forwards events, removes only its subscriptions and web prox
 test('Electron metadata and both IPC routes expose the watcher methods and event channels', async () => {
   const handlers = new Map();
   const sent = [];
+  const window = url => ({ isDestroyed: () => false, webContents: { isDestroyed: () => false, getURL: () => url, send: (...args) => sent.push(args) } });
   const electron = {
+    app: { isPackaged: false, getAppPath: () => '/app' },
     ipcMain: { removeHandler: key => handlers.delete(key), handle: (key, fn) => handlers.set(key, fn) },
-    BrowserWindow: { getAllWindows: () => [{ isDestroyed: () => false, webContents: { isDestroyed: () => false, send: (...args) => sent.push(args) } }] },
+    BrowserWindow: { getAllWindows: () => [window('capacitor-electron://localhost/index.html'), window('https://attacker.example/'), window('file:///outside/index.html')] },
   };
   const exports = {};
   vm.runInNewContext(readFileSync(require.resolve('../../.tmp/e2e-build/electron/mdns.js'), 'utf8'), {
     exports, require: name => name === 'electron' ? electron : require(name),
-    console, setTimeout, clearTimeout, setInterval, clearInterval, Buffer, structuredClone,
+    console, setTimeout, clearTimeout, setInterval, clearInterval, Buffer, structuredClone, URL,
   });
   const fake = fakeBonjour();
-  const mdns = new exports.mDNS(fake);
+  const mdns = new exports.mDNS(fake, { trustedOrigins: ['http://127.0.0.1:5173'] });
   try {
     mdns.init();
-    assert.equal((await handlers.get('mdns:watchServices')({}, { types: ['_http._tcp.'] })).watchersStarted, 1);
+    const frame = { url: 'capacitor-electron://localhost/index.html' };
+    const trusted = { senderFrame: frame, sender: { mainFrame: frame } };
+    for (const [channel, handler] of handlers) {
+      assert.throws(() => handler({}, {}), /Untrusted/, channel);
+      const remote = { url: 'https://attacker.example/' };
+      assert.throws(() => handler({ senderFrame: remote, sender: { mainFrame: remote } }, {}), /Untrusted/, channel);
+      assert.throws(() => handler({ senderFrame: frame, sender: { mainFrame: {} } }, {}), /Untrusted/, channel);
+    }
+    for (const url of ['file:///app/index.html', 'http://localhost:5173/', 'http://127.0.0.1:5173/']) {
+      const frame = { url };
+      assert.equal((await handlers.get('mdns:getPluginPlatform')({ senderFrame: frame, sender: { mainFrame: frame } })).platform, 'electron');
+    }
+    for (const url of ['file:///app-evil/index.html', 'file:///outside/index.html', 'http://localhost:5174/', 'capacitor-electron://localhost.evil/', 'capacitor-electron://localhost:123/']) {
+      const frame = { url };
+      assert.throws(() => handlers.get('mdns:getPluginPlatform')({ senderFrame: frame, sender: { mainFrame: frame } }), /Untrusted/, url);
+    }
+    electron.app.isPackaged = true;
+    const devFrame = { url: 'http://localhost:5173/' };
+    assert.throws(() => handlers.get('mdns:getPluginPlatform')({ senderFrame: devFrame, sender: { mainFrame: devFrame } }), /Untrusted/);
+    electron.app.isPackaged = false;
+    assert.equal((await handlers.get('mdns:watchServices')(trusted, { types: ['_http._tcp.'] })).watchersStarted, 1);
     fake.browsers[0].onUp(service('A'));
     assert.deepEqual(sent.map(args => args[0]), ['event-mDNS-serviceFound', 'mdns:event:serviceFound']);
     assert.ok(pluginSettings.pluginMethods.includes('watchServices'));
     assert.ok(pluginSettings.pluginMethods.includes('stopWatching'));
     assert.deepEqual(pluginSettings.pluginEvents, ['serviceFound', 'serviceLost', 'watchError']);
-    await handlers.get('mdns:stopWatching')({});
+    await handlers.get('mdns:stopWatching')(trusted);
   } finally { await mdns.destroy(); }
   assert.equal(handlers.size, 0);
 });
