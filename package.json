@@ -1,6 +1,6 @@
 {
   "name": "@devioarts/capacitor-mdns",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "mDNS plugin for CapacitorJS",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
@@ -32,6 +32,7 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "CHANGELOG.md",
     "android/src/main/",
     "android/build.gradle",
     "dist/",

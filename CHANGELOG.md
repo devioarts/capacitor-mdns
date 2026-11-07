@@ -1,6 +1,20 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] - 2026-11-07
+
+### Upgrade from 0.1.0
+
+- Existing method signatures and result shapes are retained. Continuous discovery is additive,
+  but validation, failure reporting and overlapping discovery behavior have changed as noted below.
+- iOS now declares a minimum deployment target of 15.0. Capacitor dependencies are restricted to
+  version 8; applications using another major version are not supported.
+- Service types, instance names, TXT records and timeouts are validated more strictly. Previously
+  tolerated invalid inputs can now return `error: true`.
+- A valid new `discover()` cancels the previous request with an error. On iOS, discovery without
+  a name filter now waits for the complete timeout. Check `error` before consuming results;
+  errors discard partial results, and a failed stop can return `publishing: true`.
+- Electron applications must install `bonjour-service@~1.4.0` and rerun `npx cap-electron sync`.
+  Manual IPC integrations using a custom renderer origin must configure `trustedOrigins`.
 
 ### Added
 
@@ -16,6 +30,7 @@
 
 ### Fixed
 
+- CocoaPods source tags now use the repository's `v` prefix. npm archives include this changelog.
 - Electron: a failed response to an incoming Bonjour query no longer permanently blocks later
   publication, discovery or watches. Fatal transport errors still stop affected operations.
 - Electron: name conflicts fail when the probe detects them, and stopping an unpublished service
