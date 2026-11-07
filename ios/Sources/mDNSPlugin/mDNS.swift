@@ -12,6 +12,9 @@ public class MDNS: NSObject {
     internal var publishTimeoutMs = 5000
     internal var resolveTimeoutSeconds: TimeInterval = 5.0
     internal var makeBrowser: () -> NetServiceBrowser = { NetServiceBrowser() }
+    internal var scheduleDiscoveryTimeout: (Int, DispatchWorkItem) -> Void = { delayMs, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delayMs), execute: work)
+    }
     internal var makeService: (_ domain: String, _ type: String, _ name: String, _ port: Int32?) -> NetService =
         MDNS.defaultMakeService
 
@@ -170,7 +173,7 @@ public class MDNS: NSObject {
             // Schedule hard timeout (always resolves/finishes).
             let ht = DispatchWorkItem { [weak self] in self?.finishDiscovery(session: session) }
             self.hardTimeout = ht
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(max(0, timeoutMs)), execute: ht)
+            self.scheduleDiscoveryTimeout(max(0, timeoutMs), ht)
 
             // Start browsing: NWBrowser preferred when available and requested.
             if useNW {
