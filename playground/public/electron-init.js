@@ -34,6 +34,9 @@
   var builtinConfig = typeof b.getBuiltinCapacitorConfig === 'function'
     ? b.getBuiltinCapacitorConfig()
     : {};
+  var fileSrcConfig = typeof b.getCapacitorFileSrcConfig === 'function'
+    ? b.getCapacitorFileSrcConfig()
+    : {};
 
   // Preserve third-party plugin bridges set by plugins-preload.ts via contextBridge.
   // Must be read BEFORE we overwrite window.CapacitorCustomPlatform below.
@@ -92,6 +95,58 @@
     return next;
   }
 
+  function convertFileSrc(filePath) {
+    if (typeof filePath !== 'string') return filePath;
+    if (!fileSrcConfig || fileSrcConfig.enabled !== true || !Array.isArray(fileSrcConfig.roots)) {
+      return filePath;
+    }
+
+    var normalized = filePath;
+    try {
+      normalized = new URL(filePath).href;
+    } catch (_err) {
+      return filePath;
+    }
+
+    for (var i = 0; i < fileSrcConfig.roots.length; i++) {
+      var root = fileSrcConfig.roots[i];
+      if (!root || typeof root.fileUrlPrefix !== 'string' || typeof root.urlPrefix !== 'string') continue;
+      if (normalized.indexOf(root.fileUrlPrefix) === 0) {
+        return root.urlPrefix + normalized.slice(root.fileUrlPrefix.length);
+      }
+    }
+
+    return filePath;
+  }
+
+  function isPluginFailureResult(value) {
+    return !!value
+      && typeof value === 'object'
+      && value.success === false
+      && value.__capacitorElectronPluginError === true;
+  }
+
+  function pluginFailureToError(result) {
+    var payload = result.error || {};
+    var err = new Error(payload.message || 'Capacitor Electron plugin call failed');
+    if (payload.code) err.code = payload.code;
+    if (payload.platform) err.platform = payload.platform;
+    if (payload.method) err.method = payload.method;
+    if (payload.details !== undefined) err.details = payload.details;
+    return err;
+  }
+
+  function invokePlugin(channel, opts) {
+    return b.invoke(channel, opts).then(function (result) {
+      // registerPlugin() marks internal failures so main can attach
+      // Capacitor-style metadata without stealing legitimate plugin results
+      // such as { success: false }. Marked bridge failures become rejected
+      // Promises, matching window.Electron.* IPC methods.
+      if (isPluginFailureResult(result)) throw pluginFailureToError(result);
+      return result;
+    });
+  }
+
   // ── Built-in Capacitor plugin headers (static) ────────────────────────────
 
   var BUILTIN = [
@@ -145,7 +200,8 @@
 
   window.Capacitor = {
     PluginHeaders:  BUILTIN.concat(b.getPluginHeaders()),
-    nativePromise:  function (p, m, o) { return b.invoke(p + '-' + m, withPreferencesMigrationPayload(p, m, o)); },
+    convertFileSrc: convertFileSrc,
+    nativePromise:  function (p, m, o) { return invokePlugin(p + '-' + m, withPreferencesMigrationPayload(p, m, o)); },
     nativeCallback: function (p, m, o, fn) { return b.nativeCallback(p, m, o, fn); },
   };
 })();
