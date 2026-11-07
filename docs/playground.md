@@ -1,6 +1,7 @@
 # Playground
 
 The `playground` directory is the maintained example app for this package.
+Its application identifier is `com.devioarts.pg.cap` on iOS, Android and Electron.
 
 It demonstrates:
 

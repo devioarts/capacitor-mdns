@@ -6,7 +6,7 @@
   "version": "0.0.0",
   "type": "module",
   "build": {
-    "appId": "com.devioarts.example.mdns",
+    "appId": "com.devioarts.pg.cap",
     "productName": "cap-mdns",
     "directories": {
       "buildResources": "public",
